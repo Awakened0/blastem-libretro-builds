@@ -20,9 +20,9 @@ jobs:
           mingw-w64-x86_64-wget
           unzip
           p7zip
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Fetch the source
-      run: git clone https://www.retrodev.com/repos/blastem/
+      run: git clone https://www.retrodev.com/repos/blastem/file/tip
     - shell: msys2 {0}
       working-directory: blastem
       run: |
