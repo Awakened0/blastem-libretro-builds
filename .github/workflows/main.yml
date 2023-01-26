@@ -1,0 +1,40 @@
+name: BlastEm-libretro Builds
+on:
+  workflow_dispatch:
+jobs:
+  Windows:
+    name: Build BlastEm-libretro
+    runs-on: windows-latest
+    steps:
+    - uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: >-
+          base-devel
+          git
+          make
+          mingw-w64-x86_64-toolchain
+          mingw-w64-x86_64-ntldd
+          mingw-w64-x86_64-zlib
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-wget
+          unzip
+          p7zip
+    - uses: actions/checkout@v2
+    - name: Fetch the source
+      run: git clone https://www.retrodev.com/repos/blastem/archive/tip.zip
+    - shell: msys2 {0}
+      working-directory: blastem
+      run: |
+      make OS=Windows CC=gcc CPU=x86_64 libblastem.dll
+    - name: Zip .dll
+      working-directory: blastem
+      run: 7z a -mx=9 BlastEm-libretro-Win-x86_64.7z *.dll
+    - name: Upload 7z
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: blastem/BlastEm-libretro-Win-x86_64.7z
+        tag: Main
+        asset_name: BlastEm-libretro-Win-x86_64.7z
+        overwrite: true
