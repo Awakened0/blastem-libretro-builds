@@ -22,7 +22,7 @@ jobs:
           p7zip
     - uses: actions/checkout@v2
     - name: Fetch the source
-      run: git clone https://www.retrodev.com/repos/blastem/archive/tip.zip
+      run: git clone https://www.retrodev.com/repos/blastem/
     - shell: msys2 {0}
       working-directory: blastem
       run: |
