@@ -22,19 +22,19 @@ jobs:
           p7zip
     - uses: actions/checkout@v3
     - name: Fetch the source
-      run: git clone https://www.retrodev.com/repos/blastem/file/tip
+      run: git clone https://github.com/Awakened0/blastem-libretro-builds
     - shell: msys2 {0}
-      working-directory: blastem
+      working-directory: blastem-libretro-builds
       run: |
         make OS=Windows CC=gcc CPU=x86_64 libblastem.dll
     - name: Zip .dll
-      working-directory: blastem
+      working-directory: blastem-libretro-builds
       run: 7z a -mx=9 BlastEm-libretro-Win-x86_64.7z *.dll
     - name: Upload 7z
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: blastem/BlastEm-libretro-Win-x86_64.7z
+        file: blastem-libretro-builds/BlastEm-libretro-Win-x86_64.7z
         tag: Main
         asset_name: BlastEm-libretro-Win-x86_64.7z
         overwrite: true
