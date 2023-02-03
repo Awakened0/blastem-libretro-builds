@@ -1,3 +1,7 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "oscilloscope.h"
 #include "render.h"
 #include "blastem.h"
