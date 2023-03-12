@@ -37,6 +37,7 @@ typedef enum {
 	UI_RELOAD,
 	UI_SMS_PAUSE,
 	UI_SCREENSHOT,
+	UI_RECORD_VIDEO,
 	UI_VGM_LOG,
 	UI_EXIT,
 	UI_PLANE_DEBUG,
@@ -201,7 +202,7 @@ void set_content_binding_state(uint8_t enabled)
 
 void handle_binding_down(keybinding * binding)
 {
-	if (!current_system) {
+	if (!current_system || !content_binds_enabled) {
 		return;
 	}
 	if (binding->bind_type == BIND_GAMEPAD && current_system && current_system->gamepad_down)
@@ -411,6 +412,16 @@ void handle_binding_up(keybinding * binding)
 			if (allow_content_binds) {
 				char *path = get_content_config_path("ui\0screenshot_path\0", "ui\0screenshot_template\0", "blastem_%c.ppm");
 				render_save_screenshot(path);
+			}
+			break;
+		case UI_RECORD_VIDEO:
+			if (allow_content_binds) {
+				if (render_saving_video()) {
+					render_end_video();
+				} else {
+					char *path = get_content_config_path("ui\0video_path\0", "ui\0video_template\0", "blastem_%c.apng");
+					render_save_video(path);
+				}
 			}
 			break;
 		case UI_VGM_LOG:
@@ -678,6 +689,8 @@ int parse_binding_target(int device_num, const char * target, tern_node * padbut
 			*subtype_a = UI_SMS_PAUSE;
 		} else if (!strcmp(target + 3, "screenshot")) {
 			*subtype_a = UI_SCREENSHOT;
+		} else if (!strcmp(target + 3, "record_video")) {
+			*subtype_a = UI_RECORD_VIDEO;
 		} else if (!strcmp(target + 3, "vgm_log")) {
 			*subtype_a = UI_VGM_LOG;
 		} else if(!strcmp(target + 3, "exit")) {
