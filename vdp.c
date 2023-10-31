@@ -592,11 +592,11 @@ void vdp_print_sprite_table(vdp_context * context)
 //6 would trigger regsiter write 0110
 //7 is a mystery //0111
 #define CRAM_READ 8  //1000
-//9 is also a mystery //1001
+//writes go nowhere, acts 8-bit wide like VRAM //1001
 //A would trigger register write 1010
 //B is a mystery 1011
 #define VRAM_READ8 0xC //1100
-//D is a mystery 1101
+//writes go nowhere, acts 16-bit wide like VSRAM/CRAM 1101
 //E would trigger register write 1110
 //F is a mystery 1111
 
@@ -716,13 +716,10 @@ void vdp_print_reg_explain(vdp_context * context)
 	       context->address, context->cd, cd_name(context->cd),
 		   (context->flags & FLAG_PENDING) ? "word" : (context->flags2 & FLAG2_BYTE_PENDING) ? "byte" : "none",
 		   context->vcounter, context->hslot*2, (context->flags2 & FLAG2_VINT_PENDING) ? "true" : "false",
-		   (context->flags2 & FLAG2_HINT_PENDING) ? "true" : "false", vdp_control_port_read(context));
+		   (context->flags2 & FLAG2_HINT_PENDING) ? "true" : "false", vdp_status(context));
 	printf("\nDebug Register: %X | Output disabled: %s, Force Layer: %d\n", context->test_port,
 		(context->test_port & TEST_BIT_DISABLE)  ? "true" : "false", context->test_port >> 7 & 3
 	);
-	//restore flags as calling vdp_control_port_read can change them
-	context->flags = old_flags;
-	context->flags2 = old_flags2;
 }
 
 static uint8_t is_active(vdp_context *context)
@@ -928,8 +925,6 @@ static void read_sprite_x_mode4(vdp_context * context)
 	}
 }
 
-#define CRAM_BITS 0xEEE
-#define VSRAM_BITS 0x7FF
 #define VSRAM_DIRTY_BITS 0xF800
 
 //rough estimate of slot number at which border display starts
@@ -1122,7 +1117,7 @@ static void external_slot(vdp_context * context)
 
 			break;
 		default:
-			if (!(context->cd & 4) && !start->partial && (context->regs[REG_MODE_2] & (BIT_128K_VRAM|BIT_MODE_5)) != (BIT_128K_VRAM|BIT_MODE_5)) {
+			if (!(context->cd & 6) && !start->partial && (context->regs[REG_MODE_2] & (BIT_128K_VRAM|BIT_MODE_5)) != (BIT_128K_VRAM|BIT_MODE_5)) {
 				start->partial = 1;
 				return;
 			}
@@ -1131,6 +1126,9 @@ static void external_slot(vdp_context * context)
 		if (context->fifo_read == context->fifo_write) {
 			if ((context->cd & 0x20) && (context->regs[REG_DMASRC_H] & DMA_TYPE_MASK) == DMA_FILL) {
 				context->flags |= FLAG_DMA_RUN;
+				if (context->dma_hook) {
+					context->dma_hook(context);
+				}
 			}
 			context->fifo_read = -1;
 		}
@@ -1170,7 +1168,7 @@ static void external_slot(vdp_context * context)
 				address = mode4_address_map[address & 0x3FFF];
 			}
 			//TODO: 128K VRAM support
-			context->prefetch = context->vdpmem[context->address & 0xFFFF];
+			context->prefetch = context->vdpmem[address & 0xFFFF];
 			context->prefetch |= context->fifo[context->fifo_write].value & 0xFF00;
 			context->flags |= FLAG_READ_FETCHED;
 			//Should this happen after the prefetch or after the read?
@@ -1246,18 +1244,25 @@ static void read_map_scroll(uint16_t column, uint16_t vsram_off, uint32_t line, 
 		v_offset_mask = 0x7;
 		vscroll_shift = 3;
 	}
-	//TODO: Further research on vscroll latch behavior and the "first column bug"
+	//TODO: Further research on vscroll latch behavior
 	if (context->regs[REG_MODE_3] & BIT_VSCROLL) {
 		if (!column) {
 			if (context->regs[REG_MODE_4] & BIT_H40) {
-				//Based on observed behavior documented by Eke-Eke, I'm guessing the VDP
-				//ends up fetching the last value on the VSRAM bus in the H40 case
-				//getting the last latched value should be close enough for now
-				if (!vsram_off) {
-					context->vscroll_latch[0] = context->vscroll_latch[1];
+				//Pre MD2VA4, behavior seems to vary from console to console
+				//On some consoles it's a stable AND, on some it's always zero and others it's an "unstable" AND
+				if (context->vsram_size == MIN_VSRAM_SIZE) {
+					// For now just implement the AND behavior
+					if (!vsram_off) {
+						context->vscroll_latch[0] &= context->vscroll_latch[1];
+						context->vscroll_latch[1] = context->vscroll_latch[0];
+					}
+				} else {
+					//MD2VA4 and later use the column 0 value
+					context->vscroll_latch[vsram_off] = context->vsram[vsram_off];
 				}
 			} else {
 				//supposedly it's always forced to 0 in the H32 case
+				//TODO: repeat H40 tests in H32 mode to confirm
 				context->vscroll_latch[0] = context->vscroll_latch[1] = 0;
 			}
 		} else if (context->regs[REG_MODE_3] & BIT_VSCROLL) {
@@ -4598,6 +4603,75 @@ uint16_t vdp_hv_counter_read(vdp_context * context)
 	return hv;
 }
 
+void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value)
+{
+	uint8_t mode_5 = context->regs[REG_MODE_2] & BIT_MODE_5;
+	if (reg < (mode_5 ? VDP_REGS : 0xB)) {
+		//printf("register %d set to %X\n", reg, value & 0xFF);
+		if (reg == REG_MODE_1 && (value & BIT_HVC_LATCH) && !(context->regs[reg] & BIT_HVC_LATCH)) {
+			vdp_latch_hv(context);
+		} else if (reg == REG_BG_COLOR) {
+			value &= 0x3F;
+		} else if (reg == REG_MODE_2 && context->type != VDP_GENESIS) {
+			// only the Genesis VDP does anything with this bit
+			// so just clear it to prevent Mode 5 selection if we're not emulating that chip
+			value &= ~BIT_MODE_5;
+		}
+		/*if (reg == REG_MODE_4 && ((value ^ context->regs[reg]) & BIT_H40)) {
+			printf("Mode changed from H%d to H%d @ %d, frame: %d\n", context->regs[reg] & BIT_H40 ? 40 : 32, value & BIT_H40 ? 40 : 32, context->cycles, context->frame);
+		}*/
+		uint8_t buffer[2] = {reg, value};
+		event_log(EVENT_VDP_REG, context->cycles, sizeof(buffer), buffer);
+		context->regs[reg] = value;
+		if (reg == REG_MODE_4) {
+			context->double_res = (value & (BIT_INTERLACE | BIT_DOUBLE_RES)) == (BIT_INTERLACE | BIT_DOUBLE_RES);
+			if (!context->double_res) {
+				context->flags2 &= ~FLAG2_EVEN_FIELD;
+			}
+		}
+		if (reg == REG_MODE_1 || reg == REG_MODE_2 || reg == REG_MODE_4) {
+			update_video_params(context);
+		}
+	} else if (reg == REG_KMOD_CTRL) {
+		if (!(value & 0xFF)) {
+			context->system->enter_debugger = 1;
+		}
+	} else if (reg == REG_KMOD_MSG) {
+		char c = value;
+		if (c) {
+			context->kmod_buffer_length++;
+			if ((context->kmod_buffer_length + 1) > context->kmod_buffer_storage) {
+				context->kmod_buffer_storage = context->kmod_buffer_length ? 128 : context->kmod_buffer_length * 2;
+				context->kmod_msg_buffer = realloc(context->kmod_msg_buffer, context->kmod_buffer_storage);
+			}
+			context->kmod_msg_buffer[context->kmod_buffer_length - 1] = c;
+		} else if (context->kmod_buffer_length) {
+			context->kmod_msg_buffer[context->kmod_buffer_length] = 0;
+			if (is_stdout_enabled()) {
+				init_terminal();
+				printf("KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
+			} else {
+				// GDB remote debugging is enabled, use stderr instead
+				fprintf(stderr, "KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
+			}
+			context->kmod_buffer_length = 0;
+		}
+	} else if (reg == REG_KMOD_TIMER) {
+		if (!(value & 0x80)) {
+			if (is_stdout_enabled()) {
+				init_terminal();
+				printf("KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
+			} else {
+				// GDB remote debugging is enabled, use stderr instead
+				fprintf(stderr, "KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
+			}
+		}
+		if (value & 0xC0) {
+			context->timer_start_cycle = context->cycles;
+		}
+	}
+}
+
 int vdp_control_port_write(vdp_context * context, uint16_t value, uint32_t cpu_cycle)
 {
 	//printf("control port write: %X at %d\n", value, context->cycles);
@@ -4634,10 +4708,17 @@ int vdp_control_port_write(vdp_context * context, uint16_t value, uint32_t cpu_c
 					//only captures are from a direct color DMA demo which will generally start DMA at a very specific point in display so other values are plausible
 					//sticking with 3 slots for now until I can do some more captures
 					vdp_run_context_full(context, context->cycles + 12 * ((context->regs[REG_MODE_2] & BIT_MODE_5) && (context->regs[REG_MODE_4] & BIT_H40) ? 4 : 5));
+					vdp_dma_started();
 					context->flags |= FLAG_DMA_RUN;
+					if (context->dma_hook) {
+						context->dma_hook(context);
+					}
 					return 1;
 				} else {
 					context->flags |= FLAG_DMA_RUN;
+					if (context->dma_hook) {
+						context->dma_hook(context);
+					}
 					//printf("DMA Copy Address: %X, New CD: %X, Source: %X\n", context->address, context->cd, (context->regs[REG_DMASRC_M] << 8) | context->regs[REG_DMASRC_L]);
 				}
 			} else {
@@ -4650,71 +4731,11 @@ int vdp_control_port_write(vdp_context * context, uint16_t value, uint32_t cpu_c
 		context->cd = (context->cd & 0x3C) | (value >> 14);
 		if ((value & 0xC000) == 0x8000) {
 			//Register write
-			uint8_t reg = (value >> 8) & 0x1F;
-			if (reg < (mode_5 ? VDP_REGS : 0xB)) {
-				//printf("register %d set to %X\n", reg, value & 0xFF);
-				if (reg == REG_MODE_1 && (value & BIT_HVC_LATCH) && !(context->regs[reg] & BIT_HVC_LATCH)) {
-					vdp_latch_hv(context);
-				} else if (reg == REG_BG_COLOR) {
-					value &= 0x3F;
-				} else if (reg == REG_MODE_2 && context->type != VDP_GENESIS) {
-					// only the Genesis VDP does anything with this bit
-					// so just clear it to prevent Mode 5 selection if we're not emulating that chip
-					value &= ~BIT_MODE_5;
-				}
-				/*if (reg == REG_MODE_4 && ((value ^ context->regs[reg]) & BIT_H40)) {
-					printf("Mode changed from H%d to H%d @ %d, frame: %d\n", context->regs[reg] & BIT_H40 ? 40 : 32, value & BIT_H40 ? 40 : 32, context->cycles, context->frame);
-				}*/
-				uint8_t buffer[2] = {reg, value};
-				event_log(EVENT_VDP_REG, context->cycles, sizeof(buffer), buffer);
-				context->regs[reg] = value;
-				if (reg == REG_MODE_4) {
-					context->double_res = (value & (BIT_INTERLACE | BIT_DOUBLE_RES)) == (BIT_INTERLACE | BIT_DOUBLE_RES);
-					if (!context->double_res) {
-						context->flags2 &= ~FLAG2_EVEN_FIELD;
-					}
-				}
-				if (reg == REG_MODE_1 || reg == REG_MODE_2 || reg == REG_MODE_4) {
-					update_video_params(context);
-				}
-			} else if (reg == REG_KMOD_CTRL) {
-				if (!(value & 0xFF)) {
-					context->system->enter_debugger = 1;
-				}
-			} else if (reg == REG_KMOD_MSG) {
-				char c = value;
-				if (c) {
-					context->kmod_buffer_length++;
-					if ((context->kmod_buffer_length + 1) > context->kmod_buffer_storage) {
-						context->kmod_buffer_storage = context->kmod_buffer_length ? 128 : context->kmod_buffer_length * 2;
-						context->kmod_msg_buffer = realloc(context->kmod_msg_buffer, context->kmod_buffer_storage);
-					}
-					context->kmod_msg_buffer[context->kmod_buffer_length - 1] = c;
-				} else if (context->kmod_buffer_length) {
-					context->kmod_msg_buffer[context->kmod_buffer_length] = 0;
-					if (is_stdout_enabled()) {
-						init_terminal();
-						printf("KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
-					} else {
-						// GDB remote debugging is enabled, use stderr instead
-						fprintf(stderr, "KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
-					}
-					context->kmod_buffer_length = 0;
-				}
-			} else if (reg == REG_KMOD_TIMER) {
-				if (!(value & 0x80)) {
-					if (is_stdout_enabled()) {
-						init_terminal();
-						printf("KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
-					} else {
-						// GDB remote debugging is enabled, use stderr instead
-						fprintf(stderr, "KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
-					}
-				}
-				if (value & 0xC0) {
-					context->timer_start_cycle = context->cycles;
-				}
+			uint16_t reg = (value >> 8) & 0x1F;
+			if (context->reg_hook) {
+				context->reg_hook(context, reg, value);
 			}
+			vdp_reg_write(context, reg, value);
 		} else if (mode_5) {
 			context->flags |= FLAG_PENDING;
 			//Should these be taken care of here or after the second write?
@@ -4764,6 +4785,9 @@ int vdp_data_port_write(vdp_context * context, uint16_t value)
 	}
 	while (context->fifo_write == context->fifo_read) {
 		vdp_run_context_full(context, context->cycles + ((context->regs[REG_MODE_4] & BIT_H40) ? 16 : 20));
+	}
+	if (context->data_hook) {
+		context->data_hook(context, value);
 	}
 	fifo_entry * cur = context->fifo + context->fifo_write;
 	cur->cycle = context->cycles + ((context->regs[REG_MODE_4] & BIT_H40) ? 16 : 20)*FIFO_LATENCY;
@@ -4823,10 +4847,8 @@ void vdp_test_port_write(vdp_context * context, uint16_t value)
 	context->test_port = value;
 }
 
-uint16_t vdp_control_port_read(vdp_context * context)
+uint16_t vdp_status(vdp_context *context)
 {
-	context->flags &= ~FLAG_PENDING;
-	context->flags2 &= ~FLAG2_BYTE_PENDING;
 	//Bits 15-10 are not fixed like Charles MacDonald's doc suggests, but instead open bus values that reflect 68K prefetch
 	uint16_t value = context->system->get_open_bus_value(context->system) & 0xFC00;
 	if (context->fifo_read < 0) {
@@ -4840,11 +4862,9 @@ uint16_t vdp_control_port_read(vdp_context * context)
 	}
 	if (context->flags & FLAG_DOT_OFLOW) {
 		value |= 0x40;
-		context->flags &= ~FLAG_DOT_OFLOW;
 	}
 	if (context->flags2 & FLAG2_SPRITE_COLLIDE) {
 		value |= 0x20;
-		context->flags2 &= ~FLAG2_SPRITE_COLLIDE;
 	}
 	if ((context->regs[REG_MODE_4] & BIT_INTERLACE) && !(context->flags2 & FLAG2_EVEN_FIELD)) {
 		value |= 0x10;
@@ -4868,6 +4888,14 @@ uint16_t vdp_control_port_read(vdp_context * context)
 	if (context->flags2 & FLAG2_REGION_PAL) {
 		value |= 0x1;
 	}
+	return value;
+}
+
+uint16_t vdp_control_port_read(vdp_context * context)
+{
+	uint16_t value = vdp_status(context);
+	context->flags &= ~(FLAG_DOT_OFLOW|FLAG_PENDING);
+	context->flags2 &= ~(FLAG2_SPRITE_COLLIDE|FLAG2_BYTE_PENDING);
 	//printf("status read at cycle %d returned %X\n", context->cycles, value);
 	return value;
 }

@@ -285,12 +285,28 @@ uint16_t read_dma_value(uint32_t address)
 		uint32_t word_ram_end = cd->base + 0x240000;
 		if (address >= word_ram && address < word_ram_end) {
 			//FIXME: first word should just be garbage
-			address -= 2;
+			if (!cd->has_vdp_dma_value) {
+				cd->vdp_dma_value = read_word(genesis->m68k->last_prefetch_address, (void **)genesis->m68k->mem_pointers, &genesis->m68k->options->gen, genesis->m68k);
+				cd->has_vdp_dma_value = 1;
+			}
+			uint16_t ret = cd->vdp_dma_value;
+			cd->vdp_dma_value = read_word(address, (void **)genesis->m68k->mem_pointers, &genesis->m68k->options->gen, genesis->m68k);
+			return ret;
 		}
 	}
 
 	return read_word(address, (void **)genesis->m68k->mem_pointers, &genesis->m68k->options->gen, genesis->m68k);
 }
+
+void vdp_dma_started(void)
+{
+	genesis_context *genesis = (genesis_context *)current_system;
+	if (genesis->expansion) {
+		segacd_context *cd = genesis->expansion;
+		cd->has_vdp_dma_value = 0;
+	}
+}
+
 
 static uint16_t get_open_bus_value(system_header *system)
 {
@@ -455,6 +471,49 @@ static void sync_sound(genesis_context * gen, uint32_t target)
 #define REFRESH_INTERVAL 128
 #define REFRESH_DELAY 2
 
+void gen_update_refresh(m68k_context *context)
+{
+	uint32_t interval = MCLKS_PER_68K * REFRESH_INTERVAL;
+	genesis_context *gen = context->system;
+	gen->refresh_counter += context->current_cycle - gen->last_sync_cycle;
+	gen->last_sync_cycle = context->current_cycle;
+	context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / interval);
+	gen->refresh_counter = gen->refresh_counter % interval;
+}
+
+void gen_update_refresh_free_access(m68k_context *context)
+{
+	genesis_context *gen = context->system;
+	uint32_t before = context->current_cycle - 4*MCLKS_PER_68K;
+	if (before < gen->last_sync_cycle) {
+		return;
+	}
+	//Add refresh delays for any accesses that happened beofre the current one
+	gen->refresh_counter += before - gen->last_sync_cycle;
+	uint32_t interval = MCLKS_PER_68K * REFRESH_INTERVAL;
+	uint32_t delay = REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / interval);
+	if (delay) {
+		//To avoid the extra cycles being absorbed in the refresh free update below, we need to update again
+		gen->refresh_counter = gen->refresh_counter % interval;
+		gen->refresh_counter += delay;
+		delay += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / interval);
+		context->current_cycle += delay;
+	}
+	gen->last_sync_cycle = context->current_cycle;
+	//advance refresh counter for the current access, but don't generate delays
+	gen->refresh_counter += 4*MCLKS_PER_68K;
+	gen->refresh_counter = gen->refresh_counter % interval;
+}
+
+void gen_update_refresh_no_wait(m68k_context *context)
+{
+	uint32_t interval = MCLKS_PER_68K * REFRESH_INTERVAL;
+	genesis_context *gen = context->system;
+	gen->refresh_counter += context->current_cycle - gen->last_sync_cycle;
+	gen->last_sync_cycle = context->current_cycle;
+	gen->refresh_counter = gen->refresh_counter % interval;
+}
+
 #include <limits.h>
 #define ADJUST_BUFFER (8*MCLKS_LINE*313)
 #define MAX_NO_ADJUST (UINT_MAX-ADJUST_BUFFER)
@@ -464,12 +523,11 @@ static m68k_context *sync_components(m68k_context * context, uint32_t address)
 	genesis_context * gen = context->system;
 	vdp_context * v_context = gen->vdp;
 	z80_context * z_context = gen->z80;
-	//lame estimation of refresh cycle delay
-	gen->refresh_counter += context->current_cycle - gen->last_sync_cycle;
-	if (!gen->bus_busy) {
-		context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / (MCLKS_PER_68K * REFRESH_INTERVAL));
+	if (gen->bus_busy) {
+		gen_update_refresh_no_wait(context);
+	} else {
+		gen_update_refresh(context);
 	}
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
 
 	uint32_t mclks = context->current_cycle;
 	sync_z80(gen, mclks);
@@ -545,11 +603,6 @@ static m68k_context *sync_components(m68k_context * context, uint32_t address)
 	gen->frame_end = vdp_cycles_to_frame_end(v_context);
 	context->sync_cycle = gen->frame_end;
 	//printf("Set sync cycle to: %d @ %d, vcounter: %d, hslot: %d\n", context->sync_cycle, context->current_cycle, v_context->vcounter, v_context->hslot);
-	if (context->int_ack) {
-		//printf("acknowledging %d @ %d:%d, vcounter: %d, hslot: %d\n", context->int_ack, context->current_cycle, v_context->cycles, v_context->vcounter, v_context->hslot);
-		vdp_int_ack(v_context);
-		context->int_ack = 0;
-	}
 	if (!address && (gen->header.enter_debugger || gen->header.save_state)) {
 		context->sync_cycle = context->current_cycle + 1;
 	}
@@ -611,7 +664,26 @@ static m68k_context *sync_components(m68k_context * context, uint32_t address)
 			context->sync_cycle = context->current_cycle + 1;
 		}
 	}
-	gen->last_sync_cycle = context->current_cycle;
+	return context;
+}
+
+static m68k_context *int_ack(m68k_context *context)
+{
+	genesis_context * gen = context->system;
+	vdp_context * v_context = gen->vdp;
+	//printf("acknowledging %d @ %d:%d, vcounter: %d, hslot: %d\n", context->int_ack, context->current_cycle, v_context->cycles, v_context->vcounter, v_context->hslot);
+	vdp_run_context(v_context, context->current_cycle);
+	vdp_int_ack(v_context);
+
+	//the Genesis responds to these exclusively with !VPA which means its a slow
+	//6800 operation. documentation says these can take between 10 and 19 cycles.
+	//actual results measurements seem to suggest it's actually between 9 and 18
+	//Base 68K core has added 4 cycles for a normal int ack cycle already
+	//We add 5 + the current cycle count (in 68K cycles) mod 10 to simulate the
+	//additional variable delay from the use of the 6800 cycle
+	uint32_t cycle_count = context->current_cycle / context->options->gen.clock_divider;
+	context->current_cycle += 5 + (cycle_count % 10);
+
 	return context;
 }
 
@@ -628,10 +700,7 @@ static m68k_context * vdp_port_write(uint32_t vdp_port, m68k_context * context, 
 	//printf("vdp_port write: %X, value: %X, cycle: %d\n", vdp_port, value, context->current_cycle);
 
 	//do refresh check here so we can avoid adding a penalty for a refresh that happens during a VDP access
-	gen->refresh_counter += context->current_cycle - 4*MCLKS_PER_68K - gen->last_sync_cycle;
-	context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / (MCLKS_PER_68K * REFRESH_INTERVAL));
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle;
+	gen_update_refresh_free_access(context);
 
 	sync_components(context, 0);
 	vdp_context *v_context = gen->vdp;
@@ -710,16 +779,9 @@ static m68k_context * vdp_port_write(uint32_t vdp_port, m68k_context * context, 
 		vdp_test_port_write(gen->vdp, value);
 	}
 
-	gen->last_sync_cycle -= 4 * MCLKS_PER_68K;
 	//refresh may have happened while we were waiting on the VDP,
 	//so advance refresh_counter but don't add any delays
-	if (vdp_port >= 4 && vdp_port < 8 && v_context->cycles != before_cycle) {
-		gen->refresh_counter = 0;
-	} else {
-		gen->refresh_counter += (context->current_cycle - gen->last_sync_cycle);
-		gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	}
-	gen->last_sync_cycle = context->current_cycle;
+	gen_update_refresh_no_wait(context);
 	return context;
 }
 
@@ -751,7 +813,7 @@ static void * z80_vdp_port_write(uint32_t vdp_port, void * vcontext, uint8_t val
 		sync_sound(gen, context->Z80_CYCLE);
 		psg_write(gen->psg, value);
 	} else {
-		vdp_test_port_write(gen->vdp, value);
+		vdp_test_port_write(gen->vdp, value << 8 | value);
 	}
 	return context;
 }
@@ -769,10 +831,7 @@ static uint16_t vdp_port_read(uint32_t vdp_port, m68k_context * context)
 	uint16_t value;
 
 	//do refresh check here so we can avoid adding a penalty for a refresh that happens during a VDP access
-	gen->refresh_counter += context->current_cycle - 4*MCLKS_PER_68K - gen->last_sync_cycle;
-	context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / (MCLKS_PER_68K * REFRESH_INTERVAL));
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle;
+	gen_update_refresh_free_access(context);
 
 	sync_components(context, 0);
 	vdp_context * v_context = gen->vdp;
@@ -800,12 +859,9 @@ static uint16_t vdp_port_read(uint32_t vdp_port, m68k_context * context)
 		gen->bus_busy = 0;
 	}
 
-	gen->last_sync_cycle -= 4 * MCLKS_PER_68K;
 	//refresh may have happened while we were waiting on the VDP,
 	//so advance refresh_counter but don't add any delays
-	gen->refresh_counter += (context->current_cycle - gen->last_sync_cycle);
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle;
+	gen_update_refresh_no_wait(context);
 	return value;
 }
 
@@ -866,10 +922,7 @@ static m68k_context * io_write(uint32_t location, m68k_context * context, uint8_
 	genesis_context * gen = context->system;
 
 	//do refresh check here so we can avoid adding a penalty for a refresh that happens during an IO area access
-	gen->refresh_counter += context->current_cycle - 4*MCLKS_PER_68K - gen->last_sync_cycle;
-	context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / (MCLKS_PER_68K * REFRESH_INTERVAL));
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle - 4*MCLKS_PER_68K;
+	gen_update_refresh_free_access(context);
 
 	if (location < 0x10000) {
 		//Access to Z80 memory incurs a one 68K cycle wait state
@@ -998,8 +1051,7 @@ static m68k_context * io_write(uint32_t location, m68k_context * context, uint8_
 	}
 
 	//no refresh delays during IO access
-	gen->refresh_counter += context->current_cycle - gen->last_sync_cycle;
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
+	gen_update_refresh_no_wait(context);
 	return context;
 }
 
@@ -1025,10 +1077,7 @@ static uint8_t io_read(uint32_t location, m68k_context * context)
 	genesis_context *gen = context->system;
 
 	//do refresh check here so we can avoid adding a penalty for a refresh that happens during an IO area access
-	gen->refresh_counter += context->current_cycle - 4*MCLKS_PER_68K - gen->last_sync_cycle;
-	context->current_cycle += REFRESH_DELAY * MCLKS_PER_68K * (gen->refresh_counter / (MCLKS_PER_68K * REFRESH_INTERVAL));
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle - 4*MCLKS_PER_68K;
+	gen_update_refresh_free_access(context);
 
 	if (location < 0x10000) {
 		//Access to Z80 memory incurs a one 68K cycle wait state
@@ -1127,9 +1176,7 @@ static uint8_t io_read(uint32_t location, m68k_context * context)
 	}
 
 	//no refresh delays during IO access
-	gen->refresh_counter += context->current_cycle - gen->last_sync_cycle;
-	gen->refresh_counter = gen->refresh_counter % (MCLKS_PER_68K * REFRESH_INTERVAL);
-	gen->last_sync_cycle = context->current_cycle;
+	gen_update_refresh_no_wait(context);
 	return value;
 }
 
@@ -1607,16 +1654,18 @@ static void load_save(system_header *system)
 			if (read > 0) {
 				printf("Loaded internal BRAM from %s\n", bram_name);
 			}
+		} else {
+			segacd_format_bram(cd->bram, 8 * 1024);
 		}
 		free(bram_name);
 		bram_name = path_append(system->save_dir, "cart.bram");
 		f = fopen(bram_name, "rb");
+		long configured_size = 0x2000 << cd->bram_cart_id;
 		if (f) {
 			long existing_size = nearest_pow2(file_size(f));
 			if (existing_size > 1 * 1024 * 1024) {
 				existing_size = 1 * 1024 * 1024;
 			}
-			long configured_size = 0x2000 << cd->bram_cart_id;
 			if (existing_size != configured_size) {
 				if (existing_size > configured_size) {
 					free(cd->bram_cart);
@@ -1632,6 +1681,8 @@ static void load_save(system_header *system)
 			if (read > 0) {
 				printf("Loaded BRAM cart from %s\n", bram_name);
 			}
+		} else {
+			segacd_format_bram(cd->bram_cart, configured_size);
 		}
 		free(bram_name);
 	}
@@ -2307,7 +2358,7 @@ genesis_context *alloc_config_genesis(void *rom, uint32_t rom_size, void *lock_o
 	info.map = gen->header.info.map = NULL;
 
 	m68k_options *opts = malloc(sizeof(m68k_options));
-	init_m68k_opts(opts, map, map_chunks, MCLKS_PER_68K, sync_components);
+	init_m68k_opts(opts, map, map_chunks, MCLKS_PER_68K, sync_components, int_ack);
 	if (!strcmp(tern_find_ptr_default(model, "tas", "broken"), "broken")) {
 		opts->gen.flags |= M68K_OPT_BROKEN_READ_MODIFY;
 	}
@@ -2380,7 +2431,7 @@ genesis_context *alloc_config_genesis_cdboot(system_media *media, uint32_t syste
 	uint32_t num_chunks = cd_chunks + base_chunks;
 
 	m68k_options *opts = malloc(sizeof(m68k_options));
-	init_m68k_opts(opts, map, num_chunks, MCLKS_PER_68K, sync_components);
+	init_m68k_opts(opts, map, num_chunks, MCLKS_PER_68K, sync_components, int_ack);
 	//TODO: make this configurable
 	opts->gen.flags |= M68K_OPT_BROKEN_READ_MODIFY;
 	gen->m68k = init_68k_context(opts, NULL);

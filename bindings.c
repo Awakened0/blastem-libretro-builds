@@ -39,6 +39,7 @@ typedef enum {
 	UI_SCREENSHOT,
 	UI_RECORD_VIDEO,
 	UI_VGM_LOG,
+	UI_MENU,
 	UI_EXIT,
 	UI_PLANE_DEBUG,
 	UI_VRAM_DEBUG,
@@ -63,6 +64,7 @@ typedef struct {
 	keybinding positive;
 	keybinding negative;
 	int16_t    value;
+	int16_t    deadzone;
 } joyaxis;
 
 typedef struct {
@@ -143,7 +145,7 @@ void bind_dpad(int joystick, int dpad, int direction, uint8_t bind_type, uint8_t
 	}
 }
 
-void bind_axis(int joystick, int axis, int positive, uint8_t bind_type, uint8_t subtype_a, uint8_t subtype_b)
+void bind_axis(int joystick, int axis, int positive, int deadzone, uint8_t bind_type, uint8_t subtype_a, uint8_t subtype_b)
 {
 	if (joystick >= MAX_JOYSTICKS) {
 		return;
@@ -158,6 +160,7 @@ void bind_axis(int joystick, int axis, int positive, uint8_t bind_type, uint8_t 
 		joysticks[joystick].axes = realloc(joysticks[joystick].axes, sizeof(joyaxis) * joysticks[joystick].num_axes);
 		memset(joysticks[joystick].axes + old_capacity, 0, (joysticks[joystick].num_axes - old_capacity) * sizeof(joyaxis));
 	}
+	joysticks[joystick].axes[axis].deadzone = deadzone;
 	if (positive) {
 		do_bind(&joysticks[joystick].axes[axis].positive, bind_type, subtype_a, subtype_b);
 	} else {
@@ -418,9 +421,12 @@ void handle_binding_up(keybinding * binding)
 			if (allow_content_binds) {
 				if (render_saving_video()) {
 					render_end_video();
+					render_end_audio();
 				} else {
 					char *path = get_content_config_path("ui\0video_path\0", "ui\0video_template\0", "blastem_%c.apng");
 					render_save_video(path);
+					path = get_content_config_path("ui\0audio_path\0", "ui\0audio_template\0", "blastem_%c.wav");
+					render_save_audio(path);
 				}
 			}
 			break;
@@ -435,7 +441,7 @@ void handle_binding_up(keybinding * binding)
 				}
 			}
 			break;
-		case UI_EXIT:
+		case UI_MENU:
 #ifndef DISABLE_NUKLEAR
 			if (is_nuklear_active()) {
 				show_pause_menu();
@@ -454,6 +460,8 @@ void handle_binding_up(keybinding * binding)
 			}
 #endif
 			break;
+		case UI_EXIT:
+			exit(0);
 		case UI_PLANE_DEBUG:
 		case UI_VRAM_DEBUG:
 		case UI_CRAM_DEBUG:
@@ -529,16 +537,14 @@ void handle_joy_dpad(int joystick, int dpadnum, uint8_t value)
 	}
 }
 
-#define JOY_AXIS_THRESHOLD 2000
-
 void handle_joy_axis(int joystick, int axis, int16_t value)
 {
 	if (joystick >= MAX_JOYSTICKS  || axis >= joysticks[joystick].num_axes) {
 		return;
 	}
 	joyaxis *jaxis = joysticks[joystick].axes + axis;
-	int old_active = abs(jaxis->value) > JOY_AXIS_THRESHOLD;
-	int new_active = abs(value) > JOY_AXIS_THRESHOLD;
+	int old_active = abs(jaxis->value) > jaxis->deadzone;
+	int new_active = abs(value) > jaxis->deadzone;
 	int old_pos = jaxis->value > 0;
 	int new_pos = value > 0;
 	jaxis->value = value;
@@ -693,6 +699,8 @@ int parse_binding_target(int device_num, const char * target, tern_node * padbut
 			*subtype_a = UI_RECORD_VIDEO;
 		} else if (!strcmp(target + 3, "vgm_log")) {
 			*subtype_a = UI_VGM_LOG;
+		} else if(!strcmp(target + 3, "menu")) {
+			*subtype_a = UI_MENU;
 		} else if(!strcmp(target + 3, "exit")) {
 			*subtype_a = UI_EXIT;
 		} else if (!strcmp(target + 3, "plane_debug")) {
@@ -865,6 +873,8 @@ typedef struct {
 	int       padnum;
 	tern_node *padbuttons;
 	tern_node *mousebuttons;
+	int       stick_deadzone;
+	int       trigger_deadzone;
 } pad_button_state;
 
 
@@ -897,7 +907,7 @@ void process_pad_button(char *key, tern_val val, uint8_t valtype, void *data)
 			bind_dpad(hostpadnum, render_dpad_part(hostbutton), render_direction_part(hostbutton), bindtype, subtype_a, subtype_b);
 			return;
 		} else if (hostbutton & RENDER_AXIS_BIT) {
-			bind_axis(hostpadnum, render_axis_part(hostbutton), hostbutton & RENDER_AXIS_POS, bindtype, subtype_a, subtype_b);
+			bind_axis(hostpadnum, render_axis_part(hostbutton), hostbutton & RENDER_AXIS_POS, state->trigger_deadzone, bindtype, subtype_a, subtype_b);
 			return;
 		}
 	}
@@ -928,6 +938,7 @@ void process_pad_axis(char *key, tern_val val, uint8_t valtype, void *data)
 	}
 	char *end;
 	long axis = strtol(key, &end, 10);
+	int deadzone = state->stick_deadzone;
 	if (*end) {
 		//key is not a valid base 10 integer
 		axis = render_translate_input_name(hostpadnum, key, 1);
@@ -940,6 +951,9 @@ void process_pad_axis(char *key, tern_val val, uint8_t valtype, void *data)
 			}
 			goto done;
 		}
+		if (!strcmp("lefttrigger", key) || !strcmp("righttrigger", key) || !strcmp("l2", key) || !strcmp("r2", key)) {
+			deadzone = state->trigger_deadzone;
+		}
 		if (axis & RENDER_DPAD_BIT) {
 			bind_dpad(hostpadnum, render_dpad_part(axis), render_direction_part(axis), bindtype, subtype_a, subtype_b);
 			goto done;
@@ -950,7 +964,7 @@ void process_pad_axis(char *key, tern_val val, uint8_t valtype, void *data)
 			goto done;
 		}
 	}
-	bind_axis(hostpadnum, axis, positive, bindtype, subtype_a, subtype_b);
+	bind_axis(hostpadnum, axis, positive, deadzone, bindtype, subtype_a, subtype_b);
 done:
 	free(key);
 	return;
@@ -1012,7 +1026,7 @@ uint8_t bind_down(const char *target)
 }
 
 
-tern_node *get_binding_node_for_pad(int padnum)
+tern_node *get_binding_node_for_pad(int padnum, controller_info *info)
 {
 	if (padnum > MAX_JOYSTICKS) {
 		return NULL;
@@ -1030,8 +1044,7 @@ tern_node *get_binding_node_for_pad(int padnum)
 		free(type_id);
 	}
 	if (!pad) {
-		controller_info info = get_controller_info(padnum);
-		char *key = make_controller_type_key(&info);
+		char *key = make_controller_type_key(info);
 		pad = tern_find_node(pads, key);
 		free(key);
 	}
@@ -1043,7 +1056,8 @@ tern_node *get_binding_node_for_pad(int padnum)
 
 void handle_joy_added(int joystick)
 {
-	tern_node *pad = get_binding_node_for_pad(joystick);
+	controller_info info = get_controller_info(joystick);
+	tern_node *pad = get_binding_node_for_pad(joystick, &info);
 	if (!pad) {
 		return;
 	}
@@ -1070,7 +1084,7 @@ void handle_joy_added(int joystick)
 					} else if (hostbutton & RENDER_AXIS_BIT) {
 						//SDL2 knows internally whether this should be a positive or negative binding, but doesn't expose that externally
 						//for now I'll just assume that any controller with axes for a d-pad has these mapped the "sane" way
-						bind_axis(joystick, render_axis_part(hostbutton), dir == 1 || dir == 3 ? 1 : 0, bindtype, subtype_a, subtype_b);
+						bind_axis(joystick, render_axis_part(hostbutton), dir == 1 || dir == 3 ? 1 : 0, info.stick_deadzone, bindtype, subtype_a, subtype_b);
 					} else {
 						bind_button(joystick, hostbutton, bindtype, subtype_a, subtype_b);
 					}
@@ -1078,22 +1092,19 @@ void handle_joy_added(int joystick)
 			}
 		}
 	}
+	pad_button_state state = {
+		.padnum = joystick,
+		.padbuttons = get_pad_buttons(),
+		.mousebuttons = get_mouse_buttons(),
+		.stick_deadzone = info.stick_deadzone,
+		.trigger_deadzone = info.trigger_deadzone
+	};
 	tern_node *button_node = tern_find_node(pad, "buttons");
 	if (button_node) {
-		pad_button_state state = {
-			.padnum = joystick,
-			.padbuttons = get_pad_buttons(),
-			.mousebuttons = get_mouse_buttons()
-		};
 		tern_foreach(button_node, process_pad_button, &state);
 	}
 	tern_node *axes_node = tern_find_node(pad, "axes");
 	if (axes_node) {
-		pad_button_state state = {
-			.padnum = joystick,
-			.padbuttons = get_pad_buttons(),
-			.mousebuttons = get_mouse_buttons()
-		};
 		tern_foreach(axes_node, process_pad_axis, &state);
 	}
 }
@@ -1169,14 +1180,27 @@ void set_bindings(void)
 		tern_foreach(mice, process_mouse, buttonmaps);
 	}
 	tern_node * speed_nodes = tern_find_path(config, "clocks\0speeds\0", TVAL_NODE).ptrval;
+	free(speeds);
 	speeds = malloc(sizeof(uint32_t));
 	speeds[0] = 100;
+	num_speeds = 1;
 	process_speeds(speed_nodes, NULL);
 	for (int i = 0; i < num_speeds; i++)
 	{
 		if (!speeds[i]) {
 			warning("Speed index %d was not set to a valid percentage!", i);
 			speeds[i] = 100;
+		}
+	}
+}
+
+void update_pad_bindings(void)
+{
+	for (int i = 0; i < MAX_JOYSTICKS; i++)
+	{
+		if (joysticks[i].num_buttons || joysticks[i].num_axes || joysticks[i].num_dpads) {
+			reset_joystick_bindings(i);
+			handle_joy_added(i);
 		}
 	}
 }

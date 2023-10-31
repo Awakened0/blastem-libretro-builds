@@ -154,7 +154,7 @@ static void update_mem_map(uint32_t location, sms_context *sms, uint8_t value)
 	}
 }
 
-static void *mapper_write(uint32_t location, void *vcontext, uint8_t value)
+void *sms_sega_mapper_write(uint32_t location, void *vcontext, uint8_t value)
 {
 	z80_context *z80 = vcontext;
 	sms_context *sms = z80->system;
@@ -165,7 +165,7 @@ static void *mapper_write(uint32_t location, void *vcontext, uint8_t value)
 	return vcontext;
 }
 
-static void *cart_ram_write(uint32_t location, void *vcontext, uint8_t value)
+void *sms_cart_ram_write(uint32_t location, void *vcontext, uint8_t value)
 {
 	z80_context *z80 = vcontext;
 	sms_context *sms = z80->system;
@@ -176,6 +176,34 @@ static void *cart_ram_write(uint32_t location, void *vcontext, uint8_t value)
 		z80_handle_code_write(0x8000 + location, z80);
 	}
 	return vcontext;
+}
+
+static z80_context *codemasters_write(uint8_t bank, z80_context *z80, uint8_t value)
+{
+	sms_context *sms = z80->system;
+	if (value != sms->bank_regs[bank]) {
+		sms->bank_regs[bank] = value;
+		value &= 0x7F;
+		z80->mem_pointers[bank] = sms->rom + (value << 14 & (sms->rom_size-1));
+		z80_invalidate_code_range(z80, bank * 0x4000, bank * 0x4000 + 0x4000);
+	}
+	return z80;
+}
+
+void *sms_codemasters_bank0_write(uint32_t location, void *vcontext, uint8_t value)
+{
+	return codemasters_write(0, vcontext, value);
+}
+
+void *sms_codemasters_bank1_write(uint32_t location, void *vcontext, uint8_t value)
+{
+	return codemasters_write(1, vcontext, value);
+}
+
+void *sms_codemasters_bank2_write(uint32_t location, void *vcontext, uint8_t value)
+{
+	//TODO: Handle Ernie Els Golf cart RAM
+	return codemasters_write(2, vcontext, value);
 }
 
 uint8_t debug_commands(system_header *system, char *input_buf)
@@ -679,24 +707,12 @@ static void toggle_debug_view(system_header *system, uint8_t debug_view)
 sms_context *alloc_configure_sms(system_media *media, uint32_t opts, uint8_t force_region)
 {
 	sms_context *sms = calloc(1, sizeof(sms_context));
-	uint32_t rom_size = nearest_pow2(media->size);
-	memmap_chunk memory_map[6];
-	if (media->size > 0xC000)  {
-		sms->header.info.map_chunks = 6;
-		uint8_t *ram_reg_overlap = sms->ram + sizeof(sms->ram) - 4;
-		memory_map[0] = (memmap_chunk){0x0000, 0x0400,  0xFFFF, .flags = MMAP_READ, .buffer = media->buffer};
-		memory_map[1] = (memmap_chunk){0x0400, 0x4000,  0xFFFF, .ptr_index = 0, .flags = MMAP_READ|MMAP_PTR_IDX|MMAP_CODE};
-		memory_map[2] = (memmap_chunk){0x4000, 0x8000,  0x3FFF, .ptr_index = 1, .flags = MMAP_READ|MMAP_PTR_IDX|MMAP_CODE};
-		memory_map[3] = (memmap_chunk){0x8000, 0xC000,  0x3FFF, .ptr_index = 2, .flags = MMAP_READ|MMAP_PTR_IDX|MMAP_CODE, .write_8 = cart_ram_write};
-		memory_map[4] = (memmap_chunk){0xC000, 0xFFFC,  sizeof(sms->ram)-1, .ptr_index = 0, .flags = MMAP_READ|MMAP_WRITE|MMAP_CODE, .buffer = sms->ram};
-		memory_map[5] = (memmap_chunk){0xFFFC, 0x10000, 0x0003, .ptr_index = 0, .flags = MMAP_READ, .buffer = ram_reg_overlap, .write_8 = mapper_write};
-	} else {
-		sms->header.info.map_chunks = 2;
-		memory_map[0] = (memmap_chunk){0x0000, 0xC000,  rom_size-1,         0, 0, .flags = MMAP_READ, .buffer = media->buffer};
-		memory_map[1] = (memmap_chunk){0xC000, 0x10000, sizeof(sms->ram)-1, 0, 0, .flags = MMAP_READ|MMAP_WRITE|MMAP_CODE, .buffer = sms->ram};
+	tern_node *rom_db = get_rom_db();
+	const memmap_chunk base_map[] = {
+		{0xC000, 0x10000, sizeof(sms->ram)-1, .flags = MMAP_READ|MMAP_WRITE|MMAP_CODE, .buffer = sms->ram}
 	};
-	sms->header.info.map = malloc(sizeof(memmap_chunk) * sms->header.info.map_chunks);
-	memcpy(sms->header.info.map, memory_map, sizeof(memmap_chunk) * sms->header.info.map_chunks);
+	sms->header.info = configure_rom_sms(rom_db, media->buffer, media->size, base_map, sizeof(base_map)/sizeof(base_map[0]));
+	uint32_t rom_size = sms->header.info.rom_size;
 	z80_options *zopts = malloc(sizeof(z80_options));
 	tern_node *model_def;
 	uint8_t is_gamegear = !strcasecmp(media->extension, "gg");
@@ -722,6 +738,13 @@ sms_context *alloc_configure_sms(system_media *media, uint32_t opts, uint8_t for
 			vdp_type = VDP_GENESIS;
 		} else {
 			warning("Unrecognized VDP type %s\n", vdp_str);
+		}
+	}
+	for (uint32_t i = 0; i < sms->header.info.map_chunks; i++)
+	{
+		memmap_chunk *chunk = sms->header.info.map + i;
+		if ((chunk->flags == MMAP_READ) && !chunk->buffer && chunk->start > 0xC000) {
+			chunk->buffer = sms->ram + ((chunk->start - 0xC000) & 0x1FFF);
 		}
 	}
 	if (is_gamegear) {
