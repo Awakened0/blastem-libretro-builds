@@ -32,6 +32,9 @@
 #define MAX_SPRITES_FRAME_H32 64
 #define SAT_CACHE_SIZE (MAX_SPRITES_FRAME * 4)
 
+#define CRAM_BITS 0xEEE
+#define VSRAM_BITS 0x7FF
+
 #define FBUF_SHADOW 0x0001
 #define FBUF_HILIGHT 0x0010
 #define FBUF_MODE4 0x0100
@@ -172,7 +175,12 @@ enum {
 	VDP_TMS9918A
 };
 
-typedef struct {
+typedef struct vdp_context vdp_context;
+typedef void (*vdp_hook)(vdp_context *);
+typedef void (*vdp_reg_hook)(vdp_context *, uint16_t reg, uint16_t value);
+typedef void (*vdp_data_hook)(vdp_context *, uint16_t value);
+
+struct vdp_context {
 	system_header  *system;
 	//pointer to current line in framebuffer
 	uint32_t       *output;
@@ -181,6 +189,9 @@ typedef struct {
 	uint8_t        *done_composite;
 	uint32_t       *debug_fbs[NUM_DEBUG_TYPES];
 	char           *kmod_msg_buffer;
+	vdp_hook       dma_hook;
+	vdp_reg_hook   reg_hook;
+	vdp_data_hook  data_hook;
 	uint32_t       kmod_buffer_storage;
 	uint32_t       kmod_buffer_length;
 	uint32_t       timer_start_cycle;
@@ -258,7 +269,7 @@ typedef struct {
 	uint8_t        cram_latch;
 	int32_t        color_map[1 << 12];
 	uint8_t        vdpmem[];
-} vdp_context;
+};
 
 
 
@@ -304,6 +315,9 @@ void vdp_toggle_debug_view(vdp_context *context, uint8_t debug_type);
 void vdp_inc_debug_mode(vdp_context *context);
 //to be implemented by the host system
 uint16_t read_dma_value(uint32_t address);
+void vdp_dma_started(void);
 void vdp_replay_event(vdp_context *context, uint8_t event, event_reader *reader);
+uint16_t vdp_status(vdp_context *context);
+void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value);
 
 #endif //VDP_H_

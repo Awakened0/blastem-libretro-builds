@@ -30,6 +30,7 @@ typedef struct {
 	uint32_t        graphics_dx;
 	uint32_t        graphics_dy;
 	uint16_t        graphics_dst_x;
+	uint16_t        vdp_dma_value;
 	uint8_t         graphics_pixels[4];
 	uint8_t         graphics_debug_window;
 	uint8_t         timer_pending;
@@ -50,6 +51,7 @@ typedef struct {
 	uint8_t         sub_paused_wordram;
 	uint8_t         bram_cart_write_enabled;
 	uint8_t         bram_cart_id;
+	uint8_t         has_vdp_dma_value;
 	rf5c164         pcm;
 	lc8951          cdc;
 	cdd_mcu         cdd;
@@ -66,5 +68,6 @@ void scd_toggle_graphics_debug(segacd_context *cd);
 void segacd_set_speed_percent(segacd_context *cd, uint32_t percent);
 void segacd_serialize(segacd_context *cd, serialize_buffer *buf, uint8_t all);
 void segacd_register_section_handlers(segacd_context *cd, deserialize_buffer *buf);
+void segacd_format_bram(uint8_t *buffer, size_t size);
 
 #endif //SEGACD_H_
