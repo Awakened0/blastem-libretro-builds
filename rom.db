@@ -909,6 +909,14 @@ MK-1304 {
 		2 gamepad3.2
 	}
 }
+00004016 {
+	name Forgotten Worlds
+	#Immediage game over with a 6-button controller due to a bad detection routine
+	device_overrides {
+		1 gamepad3.1
+		2 gamepad3.2
+	}
+}
 #Automatically hook up the mouse in the appropriate port for the games I've tested
 T-76076 {
 	name Nobunaga's Ambition
@@ -1421,6 +1429,36 @@ T-122026 {
 		2 gamepad3.2
 	}
 }
+T-122036 {
+	name Outworld 2375 AD
+	HeartbeatTrainer {
+		size 512
+	}
+	device_overrides {
+		1 heartbeat_trainer.1
+		2 gamepad3.2
+	}
+}
+T-122016 {
+	name NHLPA Hockey
+	HeartbeatTrainer {
+		size 512
+	}
+	device_overrides {
+		1 heartbeat_trainer.1
+		2 gamepad3.2
+	}
+}
+T-50086 {
+	name PGA Tour Golf II
+	HeartbeatTrainer {
+		size 512
+	}
+	device_overrides {
+		1 heartbeat_trainer.1
+		2 gamepad3.2
+	}
+}
 T-172116 {
 	name Triple Play: Gold Edition
 	SRAM {
@@ -1535,4 +1573,114 @@ c8a3667631fdbd4d0073e42ada9f7199d09c0cfa {
 	# but is not entirely 60Hz tolerant
 	name Alisia Dragoon
 	regions E
+}
+de10115ce6a7eb416de9cd167df9cf24e34687b1 {
+	name Super Mario 2 1998
+	map {
+		0 {
+			device ROM
+			last 3FFFFF
+		}
+		A13000 {
+			device fixed
+			last A130FF
+			value 0A0A
+		}
+	}
+}
+d0cd594ddb321f707ddba8a044fa3e9b906e720a {
+	name Othello
+	map {
+		0 {
+			device ROM
+			last 7FFF
+		}
+		8000 {
+			device RAM
+			size 800
+			last BFFF
+		}
+	}
+}
+242c29989149b94ff27d59a94f067d0f1c84b4a7 {
+	name Othello
+	map {
+		0 {
+			device ROM
+			last 7FFF
+		}
+		8000 {
+			device RAM
+			size 800
+			last BFFF
+		}
+	}
+}
+2681786bffccf58b59410c331865d30a4d027087 {
+	name The Castle
+	map {
+		0 {
+			device ROM
+			last 7FFF
+		}
+		8000 {
+			device RAM
+			size 2000
+			last BFFF
+		}
+	}
+}
+b620c2bebd5bab39bc9258a925169b4c93614599 {
+	name A Bug's Life
+	map {
+		0 {
+			device ROM
+			last 3FFFFF
+		}
+		A13000 {
+			device fixed
+			last A13001
+			value 2828
+		}
+		A13002 {
+			device fixed
+			last A13003
+			value 0101
+		}
+		A13004 {
+			device fixed
+			last A13005
+			value 1F1F
+		}
+	}
+}
+5649fa1fbfb28d58b0608e8ebc5dc7bd5c4c9678 {
+	name The Lion King II
+	map {
+		0 {
+			device ROM
+			last 3FFFFF
+		}
+		400000 {
+			device RAM
+			size 2
+			last 400007
+			bus both
+		}
+	}
+}
+6c68e4c7a5a14f926dc69ea5d5a452d9ead29a8e {
+	name Tiny Toon Adventures 3
+	map {
+		0 {
+			device ROM
+			last 3FFFFF
+		}
+		400000 {
+			device RAM
+			size 2
+			last 400007
+			bus both
+		}
+	}
 }

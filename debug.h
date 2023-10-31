@@ -15,6 +15,7 @@ typedef enum {
 	TOKEN_NONE,
 	TOKEN_NUM,
 	TOKEN_NAME,
+	TOKEN_ARRAY,
 	TOKEN_OPER,
 	TOKEN_SIZE,
 	TOKEN_LBRACKET,
@@ -97,6 +98,13 @@ struct parsed_command {
 	command_block else_block;
 };
 
+enum {
+	BP_TYPE_CPU,
+	BP_TYPE_VDPREG,
+	BP_TYPE_VDPDMA,
+	BP_TYPE_VDPDATA
+};
+
 typedef struct bp_def {
 	struct bp_def  *next;
 	parsed_command *commands;
@@ -104,9 +112,26 @@ typedef struct bp_def {
 	uint32_t       num_commands;
 	uint32_t       address;
 	uint32_t       index;
+	uint32_t       mask;
+	uint8_t        type;
 } bp_def;
 
+typedef struct debug_array debug_array;
+typedef uint32_t (*debug_array_get)(debug_root *root, debug_array *array, uint32_t index);
+typedef void (*debug_array_set)(debug_root *root, debug_array *array, uint32_t index, uint32_t value);
+typedef void (*debug_array_append)(debug_root *root, debug_array *array, uint32_t value);
+
+struct debug_array{
+	debug_array_get    get;
+	debug_array_set    set;
+	debug_array_append append;
+	uint32_t           *data;
+	uint32_t           size;
+	uint32_t           storage;
+};
+
 typedef uint8_t (*resolver)(debug_root *root, const char *name, uint32_t *out);
+typedef debug_array* (*array_resolver)(debug_root *root, const char *name);
 typedef uint8_t (*setter)(debug_root *root, const char *name, uint32_t value);
 typedef uint8_t (*reader)(debug_root *root, uint32_t *out, char size);
 typedef uint8_t (*writer)(debug_root *root, uint32_t address, uint32_t value, char size);
@@ -117,8 +142,11 @@ struct debug_root {
 	disp_def       *displays;
 	tern_node      *commands;
 	tern_node      *symbols;
+	tern_node      *variables;
+	tern_node      *arrays;
 	disasm_context *disasm;
 	resolver       resolve;
+	array_resolver array_resolve;
 	reader         read_mem;
 	setter         set;
 	writer         write_mem;
@@ -135,7 +163,7 @@ struct debug_root {
 debug_root *find_root(void *cpu);
 debug_root *find_m68k_root(m68k_context *context);
 debug_root *find_z80_root(z80_context *context);
-bp_def ** find_breakpoint(bp_def ** cur, uint32_t address);
+bp_def ** find_breakpoint(bp_def ** cur, uint32_t address, uint8_t type);
 bp_def ** find_breakpoint_idx(bp_def ** cur, uint32_t index);
 void add_display(disp_def ** head, uint32_t *index, char format_char, char * param);
 void remove_display(disp_def ** head, uint32_t index);
