@@ -94,7 +94,7 @@ typedef enum {
 #define RENDER_NOT_MAPPED -2
 #define RENDER_NOT_PLUGGED_IN -3
 
-typedef void (*drop_handler)(const char *filename);
+typedef void (*drop_handler)(char *filename);
 typedef void (*window_close_handler)(uint8_t which);
 typedef void (*ui_render_fun)(void);
 typedef int (*render_thread_fun)(void*);
@@ -118,7 +118,8 @@ void render_wait_quit(void);
 void process_events();
 int render_width();
 int render_height();
-int render_fullscreen();
+uint8_t render_fullscreen(void);
+void render_force_cursor(uint8_t force);
 void render_set_drag_drop_handler(drop_handler handler);
 void process_events();
 int32_t render_translate_input_name(int32_t controller, char *name, uint8_t is_axis);

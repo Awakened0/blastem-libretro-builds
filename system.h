@@ -16,7 +16,8 @@ typedef enum {
 	SYSTEM_SMS,
 	SYSTEM_SMS_PLAYER,
 	SYSTEM_JAGUAR,
-	SYSTEM_MEDIA_PLAYER
+	SYSTEM_MEDIA_PLAYER,
+	SYSTEM_COLECOVISION
 } system_type;
 
 typedef enum {
@@ -132,6 +133,7 @@ struct system_media {
 	char         *dir;
 	char         *name;
 	char         *extension;
+	char         *orig_path; //Full path before splitting and any extension manipulation
 	system_media *chain;
 	track_info   *tracks;
 	uint8_t      *tmp_buffer;
