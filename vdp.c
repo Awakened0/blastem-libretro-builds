@@ -60,7 +60,7 @@ enum {
 	ACTIVE
 };
 
-static uint16_t mode4_address_map[0x4000];
+uint16_t mode4_address_map[0x4000];
 static uint32_t planar_to_chunky[256];
 static uint8_t levels[] = {0, 27, 49, 71, 87, 103, 119, 130, 146, 157, 174, 190, 206, 228, 255};
 
@@ -144,6 +144,10 @@ static void update_video_params(vdp_context *context)
 	}
 	context->border_top = calc_crop(top_crop, border_top);
 	context->top_offset = border_top - context->border_top;
+	context->double_res = (context->regs[REG_MODE_4] & (BIT_INTERLACE | BIT_DOUBLE_RES)) == (BIT_INTERLACE | BIT_DOUBLE_RES);
+	if (!context->double_res) {
+		context->flags2 &= ~FLAG2_EVEN_FIELD;
+	}
 }
 
 static uint8_t static_table_init_done;
@@ -2026,12 +2030,40 @@ static void vdp_advance_line(vdp_context *context)
 						*(fb++) = context->colors[i];
 					}
 				}
-			} else {
+			} else if (context->type == VDP_GENESIS || (context->regs[REG_MODE_1] & BIT_MODE_4)) {
 				for (int i = MODE4_OFFSET; i < MODE4_OFFSET+32; i++)
 				{
 					for (int x = 0; x < 16; x++)
 					{
 						*(fb++) = context->colors[i];
+					}
+				}
+			} else if (context->type != VDP_GENESIS) {
+				uint16_t address = context->regs[REG_COLOR_TABLE] << 6;
+				for (int i = 0; i < 32; i++, address++)
+				{
+					uint8_t entry = context->vdpmem[mode4_address_map[address] ^ 1];
+					uint8_t fg = entry >> 4, bg = entry & 0xF;
+					uint32_t fg_full, bg_full;
+					if (context->type == VDP_GAMEGEAR) {
+						//Game Gear uses CRAM entries 16-31 for TMS9918A modes
+						fg_full = context->colors[fg + 16 + MODE4_OFFSET];
+						bg_full = context->colors[bg + 16 + MODE4_OFFSET];
+					} else {
+						fg <<= 1;
+						fg = (fg & 0xE) | (fg << 1 & 0x20);
+						fg_full = context->color_map[fg | FBUF_TMS];
+						bg <<= 1;
+						bg = (bg & 0xE) | (bg << 1 & 0x20);
+						bg_full = context->color_map[bg | FBUF_TMS];
+					}
+					for (int x = 0; x < 8; x++)
+					{
+						*(fb++) = fg_full;
+					}
+					for (int x = 0; x < 8; x++)
+					{
+						*(fb++) = bg_full;
 					}
 				}
 			}
@@ -2075,14 +2107,24 @@ static void vdp_advance_line(vdp_context *context)
 static void vram_debug_mode5(uint32_t *fb, uint32_t pitch, vdp_context *context)
 {
 	uint8_t pal = (context->debug_modes[DEBUG_VRAM] % 4) << 4;
+	int yshift, ymask, tilesize;
+	if (context->double_res) {
+		yshift = 5;
+		ymask = 0xF;
+		tilesize = 64;
+	} else {
+		yshift = 4;
+		ymask = 0x7;
+		tilesize = 32;
+	}
 	for (int y = 0; y < 512; y++)
 	{
 		uint32_t *line = fb + y * pitch / sizeof(uint32_t);
-		int row = y >> 4;
-		int yoff = y >> 1 & 7;
+		int row = y >> yshift;
+		int yoff = y >> 1 & ymask;
 		for (int col = 0; col < 64; col++)
 		{
-			uint16_t address = (row * 64 + col) * 32 + yoff * 4;
+			uint16_t address = (row * 64 + col) * tilesize + yoff * 4;
 			for (int x = 0; x < 4; x++)
 			{
 				uint8_t byte = context->vdpmem[address++];
@@ -2201,7 +2243,16 @@ static void vdp_update_per_frame_debug(vdp_context *context)
 			break;
 		}
 		uint32_t bg_color = context->colors[context->regs[REG_BG_COLOR & 0x3F]];
-		for (uint16_t row = 0; row < 128; row++)
+		uint16_t num_rows;
+		int num_lines;
+		if (context->double_res) {
+			num_rows = 64;
+			num_lines = 16;
+		} else {
+			num_rows = 128;
+			num_lines = 8;
+		}
+		for (uint16_t row = 0; row < num_rows; row++)
 		{
 			uint16_t row_address = table_address + (row & vscroll_mask) * v_mul;
 			for (uint16_t col = 0; col < 128; col++)
@@ -2212,19 +2263,23 @@ static void vdp_update_per_frame_debug(vdp_context *context)
 				uint16_t entry = context->vdpmem[address] << 8 | context->vdpmem[address + 1];
 				uint8_t pal = entry >> 9 & 0x30;
 
-				uint32_t *dst = fb + (row * pitch * 8 / sizeof(uint32_t)) + col * 8;
-				address = (entry & 0x7FF) * 32;
+				uint32_t *dst = fb + (row * pitch * num_lines / sizeof(uint32_t)) + col * 8;
+				if (context->double_res) {
+					address = (entry & 0x3FF) * 64;
+				} else {
+					address = (entry & 0x7FF) * 32;
+				}
 				int y_diff = 4;
 				if (entry & 0x1000) {
 					y_diff = -4;
-					address += 7 * 4;
+					address += (num_lines - 1) * 4;
 				}
 				int x_diff = 1;
 				if (entry & 0x800) {
 					x_diff = -1;
 					address += 3;
 				}
-				for (int y = 0; y < 8; y++)
+				for (int y = 0; y < num_lines; y++)
 				{
 					uint16_t trow_address = address;
 					uint32_t *row_dst = dst;
@@ -3609,7 +3664,7 @@ static void tms_fetch_color(vdp_context *context)
 		return;
 	}
 	uint16_t address = context->regs[REG_COLOR_TABLE] << 6;
-	if (context->regs[REG_MODE_2] & BIT_M3) {
+	if (context->regs[REG_MODE_1] & BIT_M3) {
 		//Graphics II
 		uint16_t upper_vcounter_mask;
 		uint16_t pattern_name_mask;
@@ -3643,7 +3698,7 @@ static void tms_fetch_pattern_value(vdp_context *context)
 		address &= 0x2000;
 		address |= context->vcounter << 5 & mask;
 	}
-	address |= context->col_1 << 3;
+	address |= context->col_1 << 3 & 0x7F8;
 	if (context->regs[REG_MODE_2] & BIT_M2) {
 		//Multicolor
 		address |= context->vcounter >> 2 & 0x3;
@@ -4623,12 +4678,6 @@ void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value)
 		uint8_t buffer[2] = {reg, value};
 		event_log(EVENT_VDP_REG, context->cycles, sizeof(buffer), buffer);
 		context->regs[reg] = value;
-		if (reg == REG_MODE_4) {
-			context->double_res = (value & (BIT_INTERLACE | BIT_DOUBLE_RES)) == (BIT_INTERLACE | BIT_DOUBLE_RES);
-			if (!context->double_res) {
-				context->flags2 &= ~FLAG2_EVEN_FIELD;
-			}
-		}
 		if (reg == REG_MODE_1 || reg == REG_MODE_2 || reg == REG_MODE_4) {
 			update_video_params(context);
 		}

@@ -478,8 +478,10 @@ static void run_sms(system_header *system)
 				}
 			}
 		}
-		if (system->enter_debugger && sms->z80->pc) {
-			system->enter_debugger = 0;
+		if ((system->enter_debugger || sms->z80->wp_hit) && sms->z80->pc) {
+			if (!sms->z80->wp_hit) {
+				system->enter_debugger = 0;
+			}
 #ifndef IS_LIB
 			zdebugger(sms->z80, sms->z80->pc);
 #endif
@@ -493,6 +495,10 @@ static void run_sms(system_header *system)
 			if (nmi != CYCLE_NEVER) {
 				z80_assert_nmi(sms->z80, nmi);
 			}
+		}
+
+		if (system->enter_debugger || sms->z80->wp_hit) {
+			target_cycle = sms->z80->Z80_CYCLE + 1;
 		}
 		z80_run(sms->z80, target_cycle);
 		if (sms->z80->reset) {
@@ -683,6 +689,8 @@ static void config_updated(system_header *system)
 {
 	sms_context *sms = (sms_context *)system;
 	setup_io_devices(config, &system->info, &sms->io);
+	//sample rate may have changed
+	psg_adjust_master_clock(sms->psg, sms->master_clock);
 }
 
 static void toggle_debug_view(system_header *system, uint8_t debug_view)

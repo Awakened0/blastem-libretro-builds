@@ -39,10 +39,10 @@ static uint8_t num_textures;
 static SDL_Rect      main_clip;
 static SDL_GLContext *main_context;
 
-static int main_width, main_height, windowed_width, windowed_height, is_fullscreen;
+static int main_width, main_height, windowed_width, windowed_height;
 
 static uint8_t render_gl = 1;
-static uint8_t scanlines = 0;
+static uint8_t scanlines, is_fullscreen, force_cursor;
 
 static uint32_t last_frame = 0;
 
@@ -159,6 +159,7 @@ static void render_close_audio()
 	*/
 }
 
+static uint8_t audio_active;
 void *render_new_audio_opaque(void)
 {
 	return SDL_CreateCond();
@@ -171,6 +172,7 @@ void render_free_audio_opaque(void *opaque)
 
 void render_audio_created(audio_source *source)
 {
+	audio_active = 1;
 	if (sync_src == SYNC_AUDIO) {
 		//SDL_PauseAudio acquires the audio device lock, which is held while the callback runs
 		//since our callback can itself be stuck waiting on the audio_ready condition variable
@@ -192,6 +194,7 @@ void render_source_paused(audio_source *src, uint8_t remaining_sources)
 	}
 	if (!remaining_sources && render_is_audio_sync()) {
 		SDL_PauseAudio(1);
+		audio_active = 0;
 		if (sync_src == SYNC_AUDIO_THREAD) {
 			SDL_CondSignal(frame_ready);
 		}
@@ -200,6 +203,7 @@ void render_source_paused(audio_source *src, uint8_t remaining_sources)
 
 void render_source_resumed(audio_source *src)
 {
+	audio_active = 1;
 	if (sync_src == SYNC_AUDIO) {
 		//SDL_PauseAudio acquires the audio device lock, which is held while the callback runs
 		//since our callback can itself be stuck waiting on the audio_ready condition variable
@@ -271,7 +275,7 @@ int render_height()
 	return main_height;
 }
 
-int render_fullscreen()
+uint8_t render_fullscreen(void)
 {
 	return is_fullscreen;
 }
@@ -299,7 +303,8 @@ void render_set_external_sync(uint8_t ext_sync_on)
 
 static int tex_width, tex_height;
 #ifndef DISABLE_OPENGL
-static GLuint textures[3], buffers[2], vshader, fshader, program, un_textures[2], un_width, un_height, un_texsize, at_pos;
+static GLuint textures[3], buffers[2], vshader, fshader, program;
+static GLint un_textures[2], un_width, un_height, un_texsize, un_curfield, un_interlaced, un_scanlines, at_pos;
 
 static GLfloat vertex_data_default[] = {
 	-1.0f, -1.0f,
@@ -453,6 +458,9 @@ static void gl_setup()
 	un_width = glGetUniformLocation(program, "width");
 	un_height = glGetUniformLocation(program, "height");
 	un_texsize = glGetUniformLocation(program, "texsize");
+	un_curfield = glGetUniformLocation(program, "curfield");
+	un_interlaced = glGetUniformLocation(program, "interlaced");
+	un_scanlines = glGetUniformLocation(program, "scanlines");
 	at_pos = glGetAttribLocation(program, "pos");
 }
 
@@ -472,8 +480,10 @@ static void render_alloc_surfaces()
 	if (texture_init) {
 		return;
 	}
-	sdl_textures= calloc(sizeof(SDL_Texture *), 3);
-	num_textures = 3;
+	if (!sdl_textures) {
+		sdl_textures= calloc(sizeof(SDL_Texture *), 3);
+		num_textures = 3;
+	}
 	texture_init = 1;
 #ifndef DISABLE_OPENGL
 	if (render_gl) {
@@ -901,6 +911,7 @@ static int32_t handle_event(SDL_Event *event)
 			need_ui_fb_resize = 1;
 #ifndef DISABLE_OPENGL
 			if (render_gl) {
+				SDL_GL_MakeCurrent(main_window, main_context);
 				if (on_context_destroyed) {
 					on_context_destroyed();
 				}
@@ -947,7 +958,7 @@ static int32_t handle_event(SDL_Event *event)
 		break;
 	case SDL_DROPFILE:
 		if (drag_drop_handler) {
-			drag_drop_handler(event->drop.file);
+			drag_drop_handler(strdup(event->drop.file));
 		}
 		SDL_free(event->drop.file);
 		break;
@@ -1026,12 +1037,26 @@ static void init_audio()
 	render_audio_initialized(format, actual.freq, actual.channels, actual.samples, SDL_AUDIO_BITSIZE(actual.format) / 8);
 }
 
-void window_setup(void)
+static void update_cursor(void)
+{
+	SDL_ShowCursor((is_fullscreen && !force_cursor) ? SDL_DISABLE : SDL_ENABLE);
+}
+
+void render_force_cursor(uint8_t force)
+{
+	if (force != force_cursor) {
+		force_cursor = force;
+		update_cursor();
+	}
+}
+
+static void window_setup(void)
 {
 	uint32_t flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 	if (is_fullscreen) {
 		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 	}
+	update_cursor();
 
 	tern_val def = {.ptrval = "audio"};
 	if (external_sync) {
@@ -1268,7 +1293,15 @@ static int in_toggle;
 
 void render_config_updated(void)
 {
-	free_surfaces();
+	int n = num_textures < FRAMEBUFFER_USER_START ? num_textures : FRAMEBUFFER_USER_START;
+	for (int i = 0; i < n; i++)
+	{
+		if (sdl_textures[i]) {
+			SDL_DestroyTexture(sdl_textures[i]);
+			sdl_textures[i] = NULL;
+		}
+	}
+	texture_init = 0;
 #ifndef DISABLE_OPENGL
 	if (render_gl) {
 		if (on_context_destroyed) {
@@ -1567,10 +1600,9 @@ uint8_t events_processed;
 #endif
 
 static uint32_t last_width, last_height;
-static uint8_t interlaced;
+static uint8_t interlaced, last_field;
 static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 {
-	static uint8_t last;
 	if (sync_src == SYNC_VIDEO && which <= FRAMEBUFFER_EVEN && source_frame_count < 0) {
 		source_frame++;
 		if (source_frame >= source_hz) {
@@ -1586,8 +1618,8 @@ static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 		? (video_standard == VID_PAL ? 294 : 243) - (overscan_top[video_standard] + overscan_bot[video_standard])
 		: 240;
 	FILE *screenshot_file = NULL;
-	uint32_t shot_height, shot_width;
 	char *ext;
+	width -= overscan_left[video_standard] + overscan_right[video_standard];
 	if (screenshot_path && which == FRAMEBUFFER_ODD) {
 		screenshot_file = fopen(screenshot_path, "wb");
 		if (screenshot_file) {
@@ -1600,27 +1632,25 @@ static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 		}
 		free(screenshot_path);
 		screenshot_path = NULL;
-		shot_height = height;
-		shot_width = width;
 	}
-	interlaced = last != which;
-	width -= overscan_left[video_standard] + overscan_right[video_standard];
+	interlaced = last_field != which;
+	buffer += overscan_left[video_standard] + LINEBUF_SIZE * overscan_top[video_standard];
 #ifndef DISABLE_OPENGL
 	if (render_gl && which <= FRAMEBUFFER_EVEN) {
 		SDL_GL_MakeCurrent(main_window, main_context);
 		glBindTexture(GL_TEXTURE_2D, textures[which]);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, LINEBUF_SIZE, height, SRC_FORMAT, GL_UNSIGNED_BYTE, buffer + overscan_left[video_standard] + LINEBUF_SIZE * overscan_top[video_standard]);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, LINEBUF_SIZE, height, SRC_FORMAT, GL_UNSIGNED_BYTE, buffer);
 
 		if (screenshot_file) {
 			//properly supporting interlaced modes here is non-trivial, so only save the odd field for now
 #ifndef DISABLE_ZLIB
 			if (!strcasecmp(ext, "png")) {
 				free(ext);
-				save_png(screenshot_file, buffer, shot_width, shot_height, LINEBUF_SIZE*sizeof(uint32_t));
+				save_png(screenshot_file, buffer, width, height, LINEBUF_SIZE*sizeof(uint32_t));
 			} else {
 				free(ext);
 #endif
-				save_ppm(screenshot_file, buffer, shot_width, shot_height, LINEBUF_SIZE*sizeof(uint32_t));
+				save_ppm(screenshot_file, buffer, width, height, LINEBUF_SIZE*sizeof(uint32_t));
 #ifndef DISABLE_ZLIB
 			}
 #endif
@@ -1631,17 +1661,14 @@ static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 				//TODO: more precise frame rate
 				apng = start_apng(apng_file, width, height, video_standard == VID_PAL ? 50.0 : 60.0);
 			}
-			save_png24_frame(
-				apng_file,
-				buffer + overscan_left[video_standard] + LINEBUF_SIZE * overscan_top[video_standard],
-				apng, width, height, LINEBUF_SIZE*sizeof(uint32_t)
-			);
+			save_png24_frame(apng_file, buffer, apng, width, height, LINEBUF_SIZE*sizeof(uint32_t));
 		}
 #endif
 	} else {
 #endif
+		uint32_t shot_height = height;
 		//TODO: Support SYNC_AUDIO_THREAD/SYNC_EXTERNAL for render API framebuffers
-		if (which <= FRAMEBUFFER_EVEN && last != which) {
+		if (which <= FRAMEBUFFER_EVEN && last_field != which) {
 			uint8_t *cur_dst = (uint8_t *)locked_pixels;
 			uint8_t *cur_saved = (uint8_t *)texture_buf;
 			uint32_t dst_off = which == FRAMEBUFFER_EVEN ? 0 : locked_pitch;
@@ -1667,11 +1694,11 @@ static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 #ifndef DISABLE_ZLIB
 			if (!strcasecmp(ext, "png")) {
 				free(ext);
-				save_png(screenshot_file, locked_pixels, shot_width, shot_height, shot_pitch);
+				save_png(screenshot_file, locked_pixels, width, shot_height, shot_pitch);
 			} else {
 				free(ext);
 #endif
-				save_ppm(screenshot_file, locked_pixels, shot_width, shot_height, shot_pitch);
+				save_ppm(screenshot_file, locked_pixels, width, shot_height, shot_pitch);
 #ifndef DISABLE_ZLIB
 			}
 #endif
@@ -1701,7 +1728,7 @@ static void process_framebuffer(uint32_t *buffer, uint8_t which, int width)
 		fclose(screenshot_file);
 	}
 	if (which <= FRAMEBUFFER_EVEN) {
-		last = which;
+		last_field = which;
 		static uint32_t frame_counter, start;
 		frame_counter++;
 		last_frame= SDL_GetTicks();
@@ -1834,7 +1861,7 @@ void render_video_loop(void)
 	SDL_LockMutex(frame_mutex);
 		for(;;)
 		{
-			while (!frame_queue_len && SDL_GetAudioStatus() == SDL_AUDIO_PLAYING)
+			while (!frame_queue_len && audio_active)
 			{
 				SDL_CondWait(frame_ready, frame_mutex);
 			}
@@ -1848,7 +1875,7 @@ void render_video_loop(void)
 				release_buffer(f.buffer);
 				SDL_LockMutex(frame_mutex);
 			}
-			if (SDL_GetAudioStatus() != SDL_AUDIO_PLAYING) {
+			if (!audio_active) {
 				break;
 			}
 		}
@@ -1866,6 +1893,7 @@ void render_update_display()
 {
 #ifndef DISABLE_OPENGL
 	if (render_gl) {
+		SDL_GL_MakeCurrent(main_window, main_context);
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
 
@@ -1875,12 +1903,27 @@ void render_update_display()
 		glUniform1i(un_textures[0], 0);
 
 		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D, textures[interlaced ? 1 : scanlines ? 2 : 0]);
+		int bot_texture = 2; //black texture
+		if (interlaced) {
+			bot_texture = 1;
+		} else if (!scanlines && un_scanlines == -1) {
+			bot_texture = 0;
+		}
+		glBindTexture(GL_TEXTURE_2D, textures[bot_texture]);
 		glUniform1i(un_textures[1], 1);
 
 		glUniform1f(un_width, render_emulated_width());
 		glUniform1f(un_height, last_height);
 		glUniform2f(un_texsize, tex_width, tex_height);
+		if (un_curfield != -1) {
+			glUniform1i(un_curfield, last_field);
+		}
+		if (un_interlaced != -1) {
+			glUniform1i(un_interlaced, interlaced);
+		}
+		if (un_scanlines != -1) {
+			glUniform1i(un_scanlines, scanlines);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
 		glVertexAttribPointer(at_pos, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat[2]), (void *)0);
@@ -2101,6 +2144,7 @@ void render_toggle_fullscreen()
 		SDL_SetWindowSize(main_window, mode.w, mode.h);
 	}
 	SDL_SetWindowFullscreen(main_window, is_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	update_cursor();
 	//Since we change the window size on transition to full screen
 	//we need to set it back to normal so we can also go back to windowed mode
 	//normally you would think that this should only be done when actually transitioning

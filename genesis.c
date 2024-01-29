@@ -370,7 +370,7 @@ static void adjust_int_cycle(m68k_context * context, vdp_context * v_context)
 	}
 
 	context->target_cycle = context->int_cycle < context->sync_cycle ? context->int_cycle : context->sync_cycle;
-	if (context->should_return || gen->header.enter_debugger) {
+	if (context->should_return || gen->header.enter_debugger || context->wp_hit) {
 		context->target_cycle = context->current_cycle;
 	} else if (context->target_cycle < context->current_cycle) {
 		//Changes to SR can result in an interrupt cycle that's in the past
@@ -611,8 +611,10 @@ static m68k_context *sync_components(m68k_context * context, uint32_t address)
 		context->target_cycle = gen->reset_cycle;
 	}
 	if (address) {
-		if (gen->header.enter_debugger) {
-			gen->header.enter_debugger = 0;
+		if (gen->header.enter_debugger || context->wp_hit) {
+			if (!context->wp_hit) {
+				gen->header.enter_debugger = 0;
+			}
 #ifndef IS_LIB
 			if (gen->header.debugger_type == DEBUGGER_NATIVE) {
 				debugger(context, address);
@@ -705,11 +707,13 @@ static m68k_context * vdp_port_write(uint32_t vdp_port, m68k_context * context, 
 	sync_components(context, 0);
 	vdp_context *v_context = gen->vdp;
 	uint32_t before_cycle = v_context->cycles;
+	uint8_t did_dma = 0;
 	if (vdp_port < 0x10) {
 		int blocked;
 		if (vdp_port < 4) {
 			while (vdp_data_port_write(v_context, value) < 0) {
 				while(v_context->flags & FLAG_DMA_RUN) {
+					did_dma = 1;
 					vdp_run_dma_done(v_context, gen->frame_end);
 					if (v_context->cycles >= gen->frame_end) {
 						uint32_t cycle_diff = v_context->cycles - context->current_cycle;
@@ -732,6 +736,7 @@ static m68k_context * vdp_port_write(uint32_t vdp_port, m68k_context * context, 
 			if (blocked) {
 				while (blocked) {
 					while(v_context->flags & FLAG_DMA_RUN) {
+						did_dma = 1;
 						vdp_run_dma_done(v_context, gen->frame_end);
 						if (v_context->cycles >= gen->frame_end) {
 							uint32_t cycle_diff = v_context->cycles - context->current_cycle;
@@ -779,9 +784,14 @@ static m68k_context * vdp_port_write(uint32_t vdp_port, m68k_context * context, 
 		vdp_test_port_write(gen->vdp, value);
 	}
 
-	//refresh may have happened while we were waiting on the VDP,
-	//so advance refresh_counter but don't add any delays
-	gen_update_refresh_no_wait(context);
+	if (did_dma) {
+		gen->refresh_counter = 0;
+		gen->last_sync_cycle = context->current_cycle;
+	} else {
+		//refresh may have happened while we were waiting on the VDP,
+		//so advance refresh_counter but don't add any delays
+		gen_update_refresh_no_wait(context);
+	}
 	return context;
 }
 
@@ -1806,6 +1816,12 @@ static void config_updated(system_header *system)
 	genesis_context *gen = (genesis_context *)system;
 	setup_io_devices(config, &system->info, &gen->io);
 	set_audio_config(gen);
+	//sample rate may have changed
+	ym_adjust_master_clock(gen->ym, gen->master_clock);
+	psg_adjust_master_clock(gen->psg, gen->master_clock);
+	if (gen->expansion) {
+		segacd_config_updated(gen->expansion);
+	}
 }
 
 static void start_vgm_log(system_header *system, char *filename)
