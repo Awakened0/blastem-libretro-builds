@@ -325,7 +325,7 @@ void z80_print_regs_exit(z80_context * context)
 
 void translate_z80inst(z80inst * inst, z80_context * context, uint16_t address, uint8_t interp)
 {
-	uint32_t num_cycles;
+	uint32_t num_cycles = 0;
 	host_ea src_op, dst_op;
 	uint8_t size;
 	z80_options *opts = context->options;
@@ -2861,15 +2861,21 @@ code_info z80_make_interp_stub(z80_context * context, uint16_t address)
 {
 	z80_options *opts = context->options;
 	code_info * code = &opts->gen.code;
-	check_alloc_code(code, 32);
+	check_alloc_code(code, 64);
 	code_info stub = {code->cur, NULL};
-	//TODO: make this play well with the breakpoint code
+
+	check_cycles_int(&opts->gen, address);
+	if (context->breakpoint_flags[address / 8] & (1 << (address % 8))) {
+		zbreakpoint_patch(context, address, stub.cur);
+	}
+	add_ir(code, 1, opts->regs[Z80_R], SZ_B);
+#ifdef Z80_LOG_ADDRESS
+	log_address(&opts->gen, address, "Z80: %X @ %d\n");
+#endif
 	mov_ir(code, address, opts->gen.scratch1, SZ_W);
 	call(code, opts->read_8);
 	//opcode fetch M-cycles have one extra T-state
 	cycles(&opts->gen, 1);
-	//TODO: increment R
-	check_cycles_int(&opts->gen, address);
 	call(code, opts->gen.save_context);
 	mov_irdisp(code, address, opts->gen.context_reg, offsetof(z80_context, pc), SZ_W);
 	push_r(code, opts->gen.context_reg);
@@ -3201,6 +3207,7 @@ void init_z80_opts(z80_options * options, memmap_chunk const * chunks, uint32_t 
 	options->gen.max_address = 0x10000;
 	options->gen.bus_cycles = 3;
 	options->gen.clock_divider = clock_divider;
+	options->gen.watchpoint_range_off = offsetof(z80_context, watchpoint_min);
 	options->gen.mem_ptr_off = offsetof(z80_context, mem_pointers);
 	options->gen.ram_flags_off = offsetof(z80_context, ram_code_flags);
 	options->gen.ram_flags_shift = 7;
@@ -3786,6 +3793,13 @@ void z80_adjust_cycles(z80_context * context, uint32_t deduction)
 			}
 		}
 	}
+	if (context->nmi_start != CYCLE_NEVER) {
+		if (context->nmi_start < deduction) {
+			context->nmi_start = 0;
+		} else {
+			context->nmi_start -= deduction;
+		}
+	}
 }
 
 uint32_t zbreakpoint_patch(z80_context * context, uint16_t address, code_ptr dst)
@@ -3866,7 +3880,6 @@ void zinsert_breakpoint(z80_context * context, uint16_t address, uint8_t * bp_ha
 		}
 	}
 }
-
 void zremove_breakpoint(z80_context * context, uint16_t address)
 {
 	context->breakpoint_flags[address / 8] &= ~(1 << (address % 8));
@@ -3878,6 +3891,100 @@ void zremove_breakpoint(z80_context * context, uint16_t address)
 		opts->gen.code.last = native + 128;
 		check_cycles_int(&opts->gen, address);
 		opts->gen.code = tmp_code;
+	}
+}
+
+static void *z80_watchpoint_check(uint32_t address, void *vcontext, uint8_t value)
+{
+	z80_context *context = vcontext;
+	z80_watchpoint *watch = NULL;
+	address &= 0xFFFF;
+	for (uint32_t i = 0; i < context->num_watchpoints; i++)
+	{
+		if (address >= context->watchpoints[i].start && address <= context->watchpoints[i].end) {
+			watch = context->watchpoints + i;
+			break;
+		}
+	}
+	if (!watch) {
+		return vcontext;
+	}
+	if (watch->check_change) {
+		uint8_t old = read_byte(address, (void **)context->mem_pointers, &context->options->gen, context);
+		if (old == value) {
+			return vcontext;
+		}
+		context->wp_old_value = old;
+	} else {
+		context->wp_old_value = value;
+	}
+	context->wp_hit_address = address;
+	context->wp_hit_value = value;
+	context->wp_hit = 1;
+	context->target_cycle = context->sync_cycle = context->current_cycle;
+	system_header *system = context->system;
+	return vcontext;
+}
+
+static void z80_enable_watchpoints(z80_context *context)
+{
+	if (context->options->gen.check_watchpoints_8) {
+		//already enabled
+		return;
+	}
+	context->watchpoint_min = 0xFFFF;
+	context->watchpoint_max = 0;
+	context->options->gen.check_watchpoints_8 = z80_watchpoint_check;
+	//re-generate write handlers with watchpoints enabled
+	code_ptr new_write8 = gen_mem_fun(&context->options->gen, context->options->gen.memmap, context->options->gen.memmap_chunks, WRITE_8, NULL);
+
+	//patch old write handlers to point to the new ones
+	code_info code = {
+		.cur = context->options->write_8,
+		.last = context->options->write_8 + 256
+	};
+	jmp(&code, new_write8);
+	context->options->write_8 = new_write8;
+}
+
+void z80_add_watchpoint(z80_context *context, uint16_t address, uint16_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_watchpoints; i++)
+	{
+		if (context->watchpoints[i].start == address && context->watchpoints[i].end == end) {
+			return;
+		}
+	}
+	z80_enable_watchpoints(context);
+	if (context->wp_storage == context->num_watchpoints) {
+		context->wp_storage = context->wp_storage ? context->wp_storage * 2 : 4;
+		context->watchpoints = realloc(context->watchpoints, context->wp_storage * sizeof(z80_watchpoint));
+	}
+	const memmap_chunk *chunk = find_map_chunk(address, &context->options->gen, 0, NULL);
+	context->watchpoints[context->num_watchpoints++] = (z80_watchpoint){
+		.start = address,
+		.end = end,
+		.check_change = chunk && (chunk->flags & MMAP_READ)
+	};
+	if (context->watchpoint_min > address) {
+		context->watchpoint_min = address;
+	}
+	if (context->watchpoint_max < end) {
+		context->watchpoint_max = end;
+	}
+}
+
+void z80_remove_watchpoint(z80_context *context, uint32_t address, uint32_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_watchpoints; i++)
+	{
+		if (context->watchpoints[i].start == address && context->watchpoints[i].end == end) {
+			context->watchpoints[i] = context->watchpoints[context->num_watchpoints-1];
+			context->num_watchpoints--;
+			return;
+		}
 	}
 }
 
