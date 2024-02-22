@@ -1,6 +1,30 @@
 #!/usr/bin/env python3
 
-
+assignmentOps = {
+	'=': 'mov',
+	'+=': 'add',
+	'-=': 'sub',
+	'<<=': 'lsl',
+	'>>=': 'lsr',
+	'&=': 'and',
+	'|=': 'or',
+	'^=': 'xor'
+}
+binaryOps = {
+	'+': 'add',
+	'-': 'sub',
+	'<<': 'lsl',
+	'>>': 'lsr',
+	'&': 'and',
+	'|': 'or',
+	'^': 'xor'
+}
+unaryOps = {
+	'~': 'not',
+	'!': 'lnot',
+	'-': 'neg'
+}
+compareOps = {'>=U', '=', '!='}
 class Block:
 	def addOp(self, op):
 		pass
@@ -11,12 +35,43 @@ class Block:
 			self.addOp(o)
 			return o
 		elif parts[0] == 'if':
-			o = If(self, parts[1])
+			if len(parts) == 4 and parts[2] in compareOps:
+				self.addOp(NormalOp(['cmp', parts[3], parts[1]]))
+				cond = parts[2]
+			else:
+				cond = parts[1]
+			o = If(self, cond)
 			self.addOp(o)
 			return o
 		elif parts[0] == 'end':
 			raise Exception('end is only allowed inside a switch or if block')
 		else:
+			if len(parts) > 1 and parts[1] in assignmentOps:
+				dst = parts[0]
+				dst,_,size = dst.partition(':')
+				op = parts[1]
+				parts = [assignmentOps[op]] + parts[2:]
+				if op == '=':
+					if len(parts) > 2 and parts[2] in binaryOps:
+						op = parts[2]
+						parts[0] = binaryOps[op]
+						del parts[2]
+					elif len(parts) > 1 and parts[1][0] in unaryOps:
+						rest = parts[1][1:]
+						op = parts[1][0]
+						if rest:
+							parts[1] = rest
+						else:
+							del parts[1]
+						parts[0] = unaryOps[op]
+				else:
+					if op == '<<=' or op == '>>=':
+						parts.insert(1, dst)
+					else:
+						parts.append(dst)
+				parts.append(dst)
+				if size:
+					parts.append(size)
 			self.addOp(NormalOp(parts))
 		return self
 		
@@ -293,7 +348,7 @@ class Op:
 			if needsCarry or needsOflow or needsHalf or (flagUpdates and needsSizeAdjust):
 				if len(params) <= 3:
 					size = prog.paramSize(rawParams[2])
-				if needsCarry and op != 'lsr':
+				if needsCarry and op != '>>':
 					size *= 2
 				decl,name = prog.getTemp(size)
 				dst = prog.carryFlowDst = name
@@ -437,7 +492,11 @@ def _updateFlagsCImpl(prog, params, rawParams):
 				resultBit = prog.getLastSize() - 1
 			elif calc == 'carry':
 				if prog.lastOp.op in ('asr', 'lsr'):
-					resultBit = 0
+					if type(prog.lastB) is int:
+						resultBit = prog.lastB - 1
+					else:
+						#FIXME!!!!!
+						resultBit = 0
 					myRes = prog.lastA
 				else:
 					resultBit = prog.getLastSize()
@@ -562,7 +621,7 @@ def _updateFlagsCImpl(prog, params, rawParams):
 	return ''.join(output)
 	
 def _cmpCImpl(prog, params, rawParams, flagUpdates):
-	size = prog.paramSize(rawParams[1])
+	b_size = size = prog.paramSize(rawParams[1])
 	needsCarry = False
 	if flagUpdates:
 		for flag in flagUpdates:
@@ -570,6 +629,15 @@ def _cmpCImpl(prog, params, rawParams, flagUpdates):
 			if calc == 'carry':
 				needsCarry = True
 				break
+	if len(params) > 2:
+		size = params[2]
+		if size == 0:
+			size = 8
+		elif size == 1:
+			size = 16
+		else:
+			size = 32
+	prog.lastSize = size
 	if needsCarry:
 		size *= 2
 	tmpvar = 'cmp_tmp{sz}__'.format(sz=size)
@@ -582,18 +650,17 @@ def _cmpCImpl(prog, params, rawParams, flagUpdates):
 	if not scope.resolveLocal(tmpvar):
 		scope.addLocal(tmpvar, size)
 	prog.lastDst = rawParams[1]
-	if len(params) > 2:
-		size = params[2]
-		if size == 0:
-			size = 8
-		elif size == 1:
-			size = 16
-		else:
-			size = 32
-		prog.lastSize = size
-	else:
-		prog.lastSize = None
-	return '\n\t{var} = {b} - {a};'.format(var = tmpvar, a = params[0], b = params[1])
+	a = params[0]
+	b = params[1]
+	a_size = prog.paramSize(rawParams[0])
+	if prog.lastSize != a_size:
+		a = '(({a}) & {mask})'.format(a = a, mask = (1 << prog.lastSize) - 1)
+	if prog.lastSize != b_size:
+		b = '(({b}) & {mask})'.format(b = b, mask = (1 << prog.lastSize) - 1)
+	if size == 64:
+		a = '((uint64_t){a})'.format(a = a)
+		b = '((uint64_t){b})'.format(b = b)
+	return '\n\t{var} = {b} - {a};'.format(var = tmpvar, a = a, b = b)
 
 def _asrCImpl(prog, params, rawParams, flagUpdates):
 	needsCarry = False
@@ -1084,6 +1151,11 @@ _ifCmpImpl = {
 		'!=': _neqCImpl
 	}
 }
+_ifCmpEval = {
+	'>=U': lambda a, b: a >= b,
+	'=': lambda a, b: a == b,
+	'!=': lambda a, b: a != b
+}
 #represents a DSL conditional construct
 class If(ChildBlock):
 	def __init__(self, parent, cond):
@@ -1147,6 +1219,13 @@ class If(ChildBlock):
 			self._genConstParam(prog.checkBool(self.cond), prog, fieldVals, output, otype)
 		else:
 			if self.cond in _ifCmpImpl[otype]:
+				if prog.lastOp.op == 'cmp':
+					params = [prog.resolveParam(p, parent, fieldVals) for p in prog.lastOp.params]
+					if type(params[0]) is int and type(params[1]) is int:
+						output.pop()
+						res = _ifCmpEval[self.cond](params[1], params[0])
+						self._genConstParam(res, prog, fieldVals, output, otype)
+						return
 				oldCond = prog.conditional
 				prog.conditional = True
 				#temp = prog.temp.copy()
@@ -1766,7 +1845,7 @@ def parse(args):
 					before,sep,after = line.partition('"')
 					before = before.strip()
 					if before:
-						parts += [el.strip() for el in before.split(' ')]
+						parts += [el.strip() for el in before.split(' ') if el.strip()]
 					if sep:
 						#TODO: deal with escaped quotes
 						inside,sep,after = after.partition('"')
