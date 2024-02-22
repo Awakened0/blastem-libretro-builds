@@ -173,7 +173,7 @@ uint32_t load_media_zip(const char *filename, system_media *dst)
 					}
 					dst->name = basename_no_extension(filename);
 					dst->size = out_size;
-					zip_close(z);
+					dst->zip = z;
 					return out_size;
 				}
 			}
@@ -187,6 +187,9 @@ uint32_t load_media_zip(const char *filename, system_media *dst)
 uint32_t load_media(char * filename, system_media *dst, system_type *stype)
 {
 	uint8_t header[10];
+	if (dst->zip) {
+		zip_close(dst->zip);
+	}
 	dst->orig_path = filename;
 	char *ext = path_extension(filename);
 	if (ext && !strcasecmp(ext, "zip")) {
@@ -389,6 +392,7 @@ void apply_updated_config(void)
 	}
 }
 
+static system_media cart, lock_on;
 static void on_drag_drop(char *filename)
 {
 	if (current_system) {
@@ -404,6 +408,7 @@ static void on_drag_drop(char *filename)
 				menu->external_game_load = 1;
 			}
 		}
+		cart.chain = NULL;
 	} else {
 		init_system_with_media(filename, SYSTEM_UNKNOWN);
 	}
@@ -414,7 +419,6 @@ static void on_drag_drop(char *filename)
 #endif
 }
 
-static system_media cart, lock_on;
 const system_media *current_media(void)
 {
 	return &cart;
@@ -609,6 +613,8 @@ int main(int argc, char ** argv)
 					stype = force_stype = SYSTEM_SMS;
 				} else if (!strcmp("gen", argv[i])) {
 					stype = force_stype = SYSTEM_GENESIS;
+				} else if (!strcmp("pico", argv[i])) {
+					stype = force_stype = SYSTEM_PICO;
 				} else if (!strcmp("jag", argv[i])) {
 					stype = force_stype = SYSTEM_JAGUAR;
 				} else if (!strcmp("media", argv[i])) {
@@ -648,8 +654,9 @@ int main(int argc, char ** argv)
 					"	-h          Print this help text\n"
 					"	-r (J|U|E)  Force region to Japan, US or Europe respectively\n"
 					"	-m MACHINE  Force emulated machine type to MACHINE. Valid values are:\n"
-					"                   sms - Sega Master System/Mark III\n"
-					"                   gen - Sega Genesis/Megadrive\n"
+					"                   sms   - Sega Master System/Mark III\n"
+					"                   gen   - Sega Genesis/Megadrive\n"
+					"                   pico  - Sega Pico\n"
 					"                   media - Media Player\n"
 					"	-f          Toggles fullscreen mode\n"
 					"	-g          Disable OpenGL rendering\n"

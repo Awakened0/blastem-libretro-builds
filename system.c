@@ -1,10 +1,13 @@
 #include <string.h>
+#include <stdlib.h>
 #include "system.h"
 #include "genesis.h"
 #include "gen_player.h"
 #include "sms.h"
 #include "mediaplayer.h"
 #include "coleco.h"
+#include "paths.h"
+#include "util.h"
 
 uint8_t safe_cmp(char *str, long offset, uint8_t *buffer, long filesize)
 {
@@ -14,6 +17,16 @@ uint8_t safe_cmp(char *str, long offset, uint8_t *buffer, long filesize)
 
 system_type detect_system_type(system_media *media)
 {
+	static char *pico_names[] = {
+		"SEGA PICO", "SEGATOYS PICO", "SEGA TOYS PICO", "SAMSUNG PICO",
+		"SEGA IAC", "IMA IKUNOUJYUKU", "IMA IKUNOJYUKU"
+	};
+	static const int num_pico = sizeof(pico_names)/sizeof(*pico_names);
+	for (int i = 0; i < num_pico; i++) {
+		if (safe_cmp(pico_names[i], 0x100, media->buffer, media->size)) {
+			return SYSTEM_PICO;
+		}
+	}
 	if (safe_cmp("SEGA", 0x100, media->buffer, media->size)) {
 		//TODO: support other bootable identifiers
 		if (safe_cmp("SEGADISCSYSTEM", 0, media->buffer, media->size)) {
@@ -105,6 +118,8 @@ system_header *alloc_config_system(system_type stype, system_media *media, uint3
 #endif
 	case SYSTEM_MEDIA_PLAYER:
 		return &(alloc_media_player(media, opts))->header;
+	case SYSTEM_PICO:
+		return &(alloc_config_pico(media->buffer, media->size, lock_on, lock_on_size, opts, force_region))->header;
 	default:
 		return NULL;
 	}
@@ -124,4 +139,52 @@ void system_request_exit(system_header *system, uint8_t force_release)
 {
 	system->force_release = force_release;
 	system->request_exit(system);
+}
+
+void* load_media_subfile(const system_media *media, char *path, uint32_t *sizeout)
+{
+#ifdef IS_LIB
+	//TODO: Figure out how to handle Pico artwork and similar cases in libretro builds
+	return NULL;
+#else
+	char *to_free = NULL;
+	void *buffer = NULL;
+	uint32_t size = 0;
+	if (media->zip) {
+		uint32_t i;
+		for (i = 0; i < media->zip->num_entries; i++)
+		{
+			if (!strcasecmp(media->zip->entries[i].name, path)) {
+				break;
+			}
+		}
+		if (i < media->zip->num_entries) {
+			size_t zsize = media->zip->entries[i].size + 1;
+			buffer = zip_read(media->zip, i, &zsize);
+			size = zsize;
+			if (buffer) {
+				((uint8_t *)buffer)[size] = 0;
+			}
+			goto end;
+		}
+	}
+	if (!is_absolute_path(path)) {
+		to_free = path = path_append(media->dir, path);
+	}
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		goto end;
+	}
+	size = file_size(f);
+	buffer = calloc(1, size + 1);
+	size = fread(buffer, 1, size, f);
+	fclose(f);
+	
+end:
+	if (sizeout) {
+		*sizeout = size;
+	}
+	free(to_free);
+	return buffer;
+#endif
 }
