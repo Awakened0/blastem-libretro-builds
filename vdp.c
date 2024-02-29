@@ -1371,8 +1371,10 @@ static void read_map_mode4(uint16_t column, uint32_t line, vdp_context * context
 	uint32_t vscroll = line;
 	if (column < 24 || !(context->regs[REG_MODE_1] & BIT_VSCRL_LOCK)) {
 		vscroll += context->regs[REG_Y_SCROLL];
+		vscroll &= 511;
 	}
 	if (vscroll > 223) {
+		//TODO: support V28 and V30 for SMS2/GG VDPs
 		vscroll -= 224;
 	}
 	address += (vscroll >> 3) * 2 * 32;
@@ -4881,7 +4883,11 @@ void vdp_data_port_write_pbc(vdp_context * context, uint8_t value)
 	if (context->regs[REG_MODE_2] & BIT_MODE_5) {
 		cur->cd = context->cd;
 	} else {
-		cur->cd = (context->cd & 2) | 1;
+		if ((context->cd & 3) == CRAM_WRITE) {
+			cur->cd = CRAM_WRITE;
+		} else {
+			cur->cd = VRAM_WRITE;
+		}
 	}
 	cur->partial = 3;
 	if (context->fifo_read < 0) {

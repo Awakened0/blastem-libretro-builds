@@ -1256,6 +1256,11 @@ m68k_save_dst
 	m68k_fetch_dst_ea M R Z
 	sbc dst 0 dst Z
 	update_flags XNZVC
+	if Z = 2
+		if M = 0
+			cycles 2
+		end
+	end
 	m68k_save_dst Z
 	m68k_prefetch
 
@@ -1661,6 +1666,76 @@ m68k_save_dst
 	scratch2 += 2
 	scratch1 = dregs.D
 	ocall write_8
+	m68k_prefetch
+
+01000100ZZMMMRRR neg
+	invalid Z 3
+	invalid M 1
+	invalid M 7 R 2
+	invalid M 7 R 3
+	invalid M 7 R 4
+	invalid M 7 R 5
+	invalid M 7 R 6
+	invalid M 7 R 7
+	
+	m68k_fetch_dst_ea M R Z
+	dst:Z = -dst
+	update_flags XNZVC
+	if Z = 2
+		if M = 0
+			cycles 2
+		end
+	end
+	m68k_save_dst Z
+	m68k_prefetch
+
+01000110ZZMMMRRR not
+	invalid Z 3
+	invalid M 1
+	invalid M 7 R 2
+	invalid M 7 R 3
+	invalid M 7 R 4
+	invalid M 7 R 5
+	invalid M 7 R 6
+	invalid M 7 R 7
+	
+	m68k_fetch_dst_ea M R Z
+	dst:Z = ~dst
+	update_flags NZV0C0
+	if Z = 2
+		if M = 0
+			cycles 2
+		end
+	end
+	m68k_save_dst Z
+	m68k_prefetch
+
+01001000ZZ000RRR ext
+	invalid Z 0
+	invalid Z 1
+	if Z = 3
+		meta bits 32
+	else
+		meta bits 16
+	end
+	sext bits dregs.R dregs.R
+	update_flags NZV0C0
+	m68k_prefetch
+
+0100111001010RRR link
+	a7 -= 4
+	scratch2 = a7
+	#TODO: confirm order of fetch and write
+	m68k_write32 aregs.R
+	m68k_prefetch
+	aregs.R = a7
+	sext 32 scratch1 scratch1
+	a7 += scratch1
+	m68k_prefetch
+
+0100100001000RRR swap
+	ror dregs.R 16 dregs.R
+	update_flags NZV0C0
 	m68k_prefetch
 
 0100111001110000 reset
