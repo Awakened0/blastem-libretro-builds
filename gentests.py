@@ -51,9 +51,9 @@ class Program(object):
 		if 'label' in already:
 			outfile.write('lbl_' + str(already['label']) + ':\n')
 		outfile.write('\t'+str(self.inst)+'\n')
-		outfile.write('\t'+self.inst.save_result(self.get_dreg(), True) + '\n')
 		save_ccr = self.get_dreg()
 		outfile.write('\tmove SR, ' + str(save_ccr) + '\n')
+		outfile.write('\t'+self.inst.save_result(self.get_dreg(), True) + '\n')
 		outfile.write('\tmove #$1F, CCR\n')
 		self.inst.invalidate_dest(already)
 		self.inst.write_init(outfile, already)
@@ -503,6 +503,8 @@ class Entry(object):
 				sources = get_variations(src, size)
 				for source in sources:
 					for dest in dests:
+						if self.name == 'link':
+							dest.value = (dest.value //2) * 2
 						res.append(Program(Inst2Op(self.name, size, source, dest)))
 			else:
 				for dest in dests:
